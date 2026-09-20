@@ -81,13 +81,13 @@ func deployTarget(ctx context.Context, target TargetConfig, certPEM, keyPEM []by
 	name := fmt.Sprintf("%s %x", target.Name, fingerprint[:4])
 	logger = logger.With("target", client.baseURL, "certificate", name)
 	operation = "login"
-	logger.Info("Logging in to UniFi", "operation", operation)
+	logger.Debug("Logging in to UniFi", "operation", operation)
 	if err := client.Login(ctx); err != nil {
 		return err
 	}
-	logger.Info("Logged in to UniFi", "operation", operation, "csrf_token_available", client.csrfToken != "")
+	logger.Debug("Logged in to UniFi", "operation", operation, "csrf_token_available", client.csrfToken != "")
 	operation = "list"
-	logger.Info("Checking existing certificates", "operation", operation)
+	logger.Debug("Checking existing certificates", "operation", operation)
 	certificates, err := client.ListCertificates(ctx)
 	if err != nil {
 		return err
@@ -108,22 +108,22 @@ func deployTarget(ctx context.Context, target TargetConfig, certPEM, keyPEM []by
 		if existing.Active == nil || !*existing.Active {
 			activate = true
 		} else {
-			logger.Info("Existing certificate is already active", "operation", operation)
+			logger.Debug("Existing certificate is already active", "operation", operation)
 		}
 	} else {
 		operation = "upload"
-		logger.Info("Uploading certificate", "operation", operation)
+		logger.Debug("Uploading certificate", "operation", operation)
 		id, err = client.UploadCertificate(ctx, name, certPEM, keyPEM)
 		if err != nil {
 			return err
 		}
 		logger = logger.With("certificate_id", id)
-		logger.Info("Certificate uploaded", "operation", operation)
+		logger.Debug("Certificate uploaded", "operation", operation)
 		activate = true
 	}
 	if activate {
 		operation = "activate"
-		logger.Info("Activating certificate", "operation", operation)
+		logger.Debug("Activating certificate", "operation", operation)
 		if err := client.ActivateCertificate(ctx, id); err != nil {
 			return err
 		}
@@ -163,7 +163,7 @@ func cleanupExpiredCertificates(ctx context.Context, client *UniFiClient, target
 	if targetID != "" {
 		logger = logger.With("target_id", targetID)
 	}
-	logger.Info("Checking expired certificates", "name", baseName)
+	logger.Debug("Checking expired certificates", "name", baseName)
 	certificates, err := client.ListCertificates(ctx)
 	if err != nil {
 		return err
@@ -188,14 +188,18 @@ func cleanupExpiredCertificates(ctx context.Context, client *UniFiClient, target
 		if !validTo.Before(now) {
 			continue
 		}
-		logger.Info("Deleting expired certificate", "certificate_id", certificate.ID)
+		logger.Debug("Deleting expired certificate", "certificate_id", certificate.ID)
 		if err := client.DeleteCertificate(ctx, certificate.ID); err != nil {
 			return err
 		}
 		deleted++
-		logger.Info("Expired certificate deleted", "certificate_id", certificate.ID)
+		logger.Debug("Expired certificate deleted", "certificate_id", certificate.ID)
 	}
-	logger.Info("Certificate cleanup completed", "checked", len(certificates), "deleted", deleted)
+	if deleted > 0 {
+		logger.Info("Certificate cleanup completed", "checked", len(certificates), "deleted", deleted)
+	} else {
+		logger.Debug("Certificate cleanup completed", "checked", len(certificates), "deleted", deleted)
+	}
 	return nil
 }
 

@@ -307,36 +307,71 @@ func TestRunCLIMultiTargetStopsAfterCancellation(t *testing.T) {
 func TestRunCLILogsOperationsWithoutSecrets(t *testing.T) {
 	for _, tt := range []struct {
 		name           string
-		cleanup        bool
+		logLevel       slog.Level
+		cleanupDeletes bool
 		rejectUpload   bool
 		wantMessages   []string
 		absentMessages []string
 	}{
 		{
-			name:    "deployment with cleanup",
-			cleanup: true,
+			name:           "info deployment with cleanup",
+			logLevel:       slog.LevelInfo,
+			cleanupDeletes: true,
+			wantMessages: []string{
+				"Certificate activated",
+				"Certificate cleanup completed",
+				"deleted=1",
+			},
+			absentMessages: []string{
+				"Logging in to UniFi",
+				"Certificate uploaded",
+				"Activating certificate",
+				"Expired certificate deleted",
+			},
+		},
+		{
+			name:           "info cleanup without deletion",
+			logLevel:       slog.LevelInfo,
+			wantMessages:   []string{"Certificate activated"},
+			absentMessages: []string{"Certificate cleanup completed"},
+		},
+		{
+			name:           "debug deployment with cleanup",
+			logLevel:       slog.LevelDebug,
+			cleanupDeletes: true,
 			wantMessages: []string{
 				"Logging in to UniFi",
 				"Logged in to UniFi",
 				"csrf_token_available=true",
+				"Checking existing certificates",
 				"Uploading certificate",
 				"Certificate uploaded",
 				"Activating certificate",
 				"Certificate activated",
+				"Checking expired certificates",
+				"Deleting expired certificate",
 				"Expired certificate deleted",
 				"Certificate cleanup completed",
 				"deleted=1",
 			},
 		},
 		{
-			name:           "deployment without cleanup",
-			wantMessages:   []string{"Certificate uploaded", "Certificate activated"},
-			absentMessages: []string{"Checking expired certificates"},
+			name:           "info upload rejected",
+			logLevel:       slog.LevelInfo,
+			cleanupDeletes: true,
+			rejectUpload:   true,
+			wantMessages: []string{
+				"Certificate operation failed",
+				"operation=upload",
+				"409 Conflict",
+			},
+			absentMessages: []string{"Uploading certificate", "Certificate uploaded", "Activating certificate", "Checking expired certificates"},
 		},
 		{
-			name:         "upload rejected",
-			cleanup:      true,
-			rejectUpload: true,
+			name:           "debug upload rejected",
+			logLevel:       slog.LevelDebug,
+			cleanupDeletes: true,
+			rejectUpload:   true,
 			wantMessages: []string{
 				"Uploading certificate",
 				"Certificate operation failed",
@@ -349,25 +384,25 @@ func TestRunCLILogsOperationsWithoutSecrets(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var output bytes.Buffer
 			previousLogger := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+			slog.SetDefault(slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: tt.logLevel})))
 			t.Cleanup(func() { slog.SetDefault(previousLogger) })
 			certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
 			keyPEM := []byte("private-key-secret-marker")
 			api := &uploadAPIFixture{
 				wantCert:        string(certPEM),
 				wantKey:         string(keyPEM),
-				cleanupName:     "fixture [prod]",
 				rejectDuplicate: tt.rejectUpload,
 				name:            "fixture [prod] cabd2a79",
+			}
+			if tt.cleanupDeletes {
+				api.cleanupName = "fixture [prod]"
 			}
 			server := httptest.NewServer(api)
 			defer server.Close()
 			certFile, keyFile := writeCLIInputFiles(t, certPEM, keyPEM)
 			setUploadEnvironment(t, server.URL, certFile, keyFile)
 			t.Setenv("UNIFI_CERT_NAME", "fixture [prod]")
-			if tt.cleanup {
-				t.Setenv("UNIFI_CLEANUP", "true")
-			}
+			t.Setenv("UNIFI_CLEANUP", "true")
 
 			err := runCLI(context.Background(), nil)
 			if (err != nil) != tt.rejectUpload {

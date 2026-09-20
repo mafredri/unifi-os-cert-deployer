@@ -1,0 +1,32 @@
+services:
+  unifi-os-le-cert-deployer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: unifi-os-le-cert-deployer:local
+    restart: unless-stopped
+    env_file:
+      - .env.dns
+    environment:
+      UNIFI_URL: "${UNIFI_URL:?Set UNIFI_URL in .env}"
+      UNIFI_USERNAME_FILE: /run/secrets/unifi_username
+      UNIFI_PASSWORD_FILE: /run/secrets/unifi_password
+      UNIFI_HTTP_TIMEOUT: "${UNIFI_HTTP_TIMEOUT:-}"
+      UNIFI_SKIP_TLS_VERIFY: "${UNIFI_SKIP_TLS_VERIFY:-}"
+      UNIFI_CERT_NAME: "${UNIFI_CERT_NAME:-}"
+      UNIFI_CLEANUP: "${UNIFI_CLEANUP:-}"
+      LEGO_DNS: "${LEGO_DNS:?Set LEGO_DNS in .env}"
+      LEGO_DOMAINS: "${LEGO_DOMAINS:?Set LEGO_DOMAINS in .env}"
+      LEGO_EMAIL: "${LEGO_EMAIL:?Set LEGO_EMAIL in .env}"
+      LEGO_SERVER: "${LEGO_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+      LEGO_CERT_NAME: unifi
+      LEGO_ACCEPT_TOS: "true"
+      LEGO_FORCE_CERT_DOMAINS: "true"
+      LEGO_LOG_LEVEL: INFO
+      CRON_SCHEDULE: "${CRON_SCHEDULE:-}"
+    volumes:
+      - certificate_state:/data
+      - ./secrets:/run/secrets:ro
+
+volumes:
+  certificate_state:

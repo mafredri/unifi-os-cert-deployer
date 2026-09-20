@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.*
+private/
+reports/
+**/reports/
+secrets/
+**/*_test.go
+bin/
+dist/
+unifi-os-le-cert-deployer
+unifi-cert-upload

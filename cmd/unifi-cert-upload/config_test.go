@@ -59,15 +59,15 @@ func TestLoadConfigUsesHookEnvironmentAndUniFiDefaults(t *testing.T) {
 
 func TestLoadConfigFlagsOverrideHookEnvironment(t *testing.T) {
 	setValidConfigEnvironment(t)
-	t.Setenv("LEGO_HOOK_CERT_PATH", "/hook/cert.pem")
+	t.Setenv("LEGO_HOOK_CERT_PATH", "/hook/certificate.crt")
 	t.Setenv("LEGO_HOOK_CERT_KEY_PATH", "/hook/key.pem")
-	t.Setenv("UNIFI_CERT_FILE", "/own/cert.pem")
+	t.Setenv("UNIFI_CERT_FILE", "/own/fullchain.pem")
 	t.Setenv("UNIFI_KEY_FILE", "/own/key.pem")
 	t.Setenv("UNIFI_CERT_NAME", "environment-name")
 	t.Setenv("UNIFI_CLEANUP", "true")
 
 	got, err := LoadConfig([]string{
-		"--cert", "/cli/cert.pem",
+		"--cert", "/cli/fullchain.pem",
 		"--key=/cli/key.pem",
 		"--name", "cli-name: $host 100%",
 		"--cleanup=false",
@@ -75,7 +75,7 @@ func TestLoadConfigFlagsOverrideHookEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	if got.CertFile != "/cli/cert.pem" || got.KeyFile != "/cli/key.pem" {
+	if got.CertFile != "/cli/fullchain.pem" || got.KeyFile != "/cli/key.pem" {
 		t.Errorf("certificate paths = (%q, %q), want CLI paths", got.CertFile, got.KeyFile)
 	}
 	target := onlyConfiguredTarget(t, got)
@@ -86,7 +86,7 @@ func TestLoadConfigFlagsOverrideHookEnvironment(t *testing.T) {
 
 func TestLoadConfigPrefersUniFiFilesOverLegoPaths(t *testing.T) {
 	setValidConfigEnvironment(t)
-	t.Setenv("UNIFI_CERT_FILE", "/own/cert.pem")
+	t.Setenv("UNIFI_CERT_FILE", "/own/fullchain.pem")
 	t.Setenv("UNIFI_KEY_FILE", "/own/key.pem")
 	t.Setenv("RENEWED_LINEAGE", "/certbot/live/console")
 
@@ -94,7 +94,7 @@ func TestLoadConfigPrefersUniFiFilesOverLegoPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	if got.CertFile != "/own/cert.pem" || got.KeyFile != "/own/key.pem" {
+	if got.CertFile != "/own/fullchain.pem" || got.KeyFile != "/own/key.pem" {
 		t.Fatalf("certificate paths = (%q, %q), want UniFi-specific paths", got.CertFile, got.KeyFile)
 	}
 }
@@ -109,7 +109,7 @@ func TestLoadConfigUsesCertbotPathsWhenOtherSourcesAreAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	wantCert := filepath.Join("/etc/letsencrypt", "live", "console", "cert.pem")
+	wantCert := filepath.Join("/etc/letsencrypt", "live", "console", "fullchain.pem")
 	wantKey := filepath.Join("/etc/letsencrypt", "live", "console", "privkey.pem")
 	if got.CertFile != wantCert || got.KeyFile != wantKey {
 		t.Fatalf("certificate paths = (%q, %q), want Certbot paths (%q, %q)", got.CertFile, got.KeyFile, wantCert, wantKey)
@@ -128,15 +128,15 @@ func TestLoadConfigDoesNotMixPartialEnvironmentPairs(t *testing.T) {
 		{
 			name: "partial UniFi pair blocks lego fallback but flag fills key",
 			setup: func(t *testing.T) {
-				t.Setenv("UNIFI_CERT_FILE", "/own/cert.pem")
+				t.Setenv("UNIFI_CERT_FILE", "/own/fullchain.pem")
 				t.Setenv("UNIFI_KEY_FILE", "")
 			},
-			args: []string{"--key", "/cli/key.pem"}, cert: "/own/cert.pem", key: "/cli/key.pem",
+			args: []string{"--key", "/cli/key.pem"}, cert: "/own/fullchain.pem", key: "/cli/key.pem",
 		},
 		{
 			name: "partial UniFi pair does not borrow lego key",
 			setup: func(t *testing.T) {
-				t.Setenv("UNIFI_CERT_FILE", "/own/cert.pem")
+				t.Setenv("UNIFI_CERT_FILE", "/own/fullchain.pem")
 				t.Setenv("UNIFI_KEY_FILE", "")
 			},
 			wantErr: true,
@@ -146,7 +146,7 @@ func TestLoadConfigDoesNotMixPartialEnvironmentPairs(t *testing.T) {
 			setup: func(t *testing.T) {
 				t.Setenv("UNIFI_CERT_FILE", "")
 				t.Setenv("UNIFI_KEY_FILE", "")
-				t.Setenv("LEGO_HOOK_CERT_PATH", "/lego/cert.pem")
+				t.Setenv("LEGO_HOOK_CERT_PATH", "/lego/certificate.crt")
 				t.Setenv("LEGO_HOOK_CERT_KEY_PATH", "")
 				t.Setenv("RENEWED_LINEAGE", "/certbot/live/console")
 			},

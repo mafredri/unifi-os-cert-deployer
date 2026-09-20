@@ -39,7 +39,7 @@ func LoadConfig(args []string) (Config, error) {
 	}
 	if certPath == "" && keyPath == "" {
 		if lineage := os.Getenv("RENEWED_LINEAGE"); lineage != "" {
-			certPath = filepath.Join(lineage, "cert.pem")
+			certPath = filepath.Join(lineage, "fullchain.pem")
 			keyPath = filepath.Join(lineage, "privkey.pem")
 		}
 	}

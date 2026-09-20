@@ -744,7 +744,7 @@ func readCertificateFixture(t *testing.T, name string) []byte {
 func writeCLIInputFiles(t *testing.T, certPEM, keyPEM []byte) (string, string) {
 	t.Helper()
 	directory := t.TempDir()
-	certFile := filepath.Join(directory, "cert.pem")
+	certFile := filepath.Join(directory, "fullchain.pem")
 	keyFile := filepath.Join(directory, "key.pem")
 	for path, contents := range map[string][]byte{certFile: certPEM, keyFile: keyPEM} {
 		if err := os.WriteFile(path, contents, 0o600); err != nil {

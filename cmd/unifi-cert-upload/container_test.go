@@ -67,7 +67,7 @@ fi
 		t.Fatalf("first queued upload = %q, want %q", got, wantAttempt)
 	}
 	pendingDirectory := filepath.Join(legoPath, "deploy", "console")
-	if got := readTestFile(t, filepath.Join(pendingDirectory, "cert.pem")); got != certificateContents {
+	if got := readTestFile(t, filepath.Join(pendingDirectory, "fullchain.pem")); got != certificateContents {
 		t.Fatalf("queued certificate = %q, want %q", got, certificateContents)
 	}
 	if got := readTestFile(t, filepath.Join(pendingDirectory, "key.pem")); got != keyContents {

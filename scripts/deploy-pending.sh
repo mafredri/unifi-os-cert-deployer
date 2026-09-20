@@ -11,8 +11,8 @@ for pending do
 	variable="LEGO_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')_DOMAINS"
 	domains=$(printenv "$variable" || printf '%s' "${LEGO_DOMAINS:-}")
 	if LEGO_HOOK_CERT_DOMAINS="$domains" /usr/local/bin/unifi-cert-upload \
-		--cert "$pending/cert.pem" --key "$pending/key.pem"; then
-		rm "$pending/cert.pem" "$pending/key.pem"
+		--cert "$pending/fullchain.pem" --key "$pending/key.pem"; then
+		rm "$pending/fullchain.pem" "$pending/key.pem"
 		rmdir "$pending"
 	else
 		status=1

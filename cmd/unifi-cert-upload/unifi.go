@@ -128,10 +128,11 @@ func (c *UniFiClient) ActivateCertificate(ctx context.Context, id string) error 
 }
 
 type UniFiCertificate struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	ValidTo string `json:"valid_to"`
-	Active  *bool  `json:"active"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+	ValidTo     string `json:"valid_to"`
+	Active      *bool  `json:"active"`
 }
 
 func (c *UniFiClient) ListCertificates(ctx context.Context) ([]UniFiCertificate, error) {

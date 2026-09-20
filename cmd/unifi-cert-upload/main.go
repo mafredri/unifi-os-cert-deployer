@@ -77,6 +77,7 @@ func deployTarget(ctx context.Context, target TargetConfig, certPEM, keyPEM []by
 	if err != nil {
 		return fmt.Errorf("create UniFi client: %w", err)
 	}
+	defer client.http.CloseIdleConnections()
 	name := fmt.Sprintf("%s %x", target.Name, fingerprint[:4])
 	logger = logger.With("target", client.baseURL, "certificate", name)
 	operation = "login"
@@ -85,20 +86,49 @@ func deployTarget(ctx context.Context, target TargetConfig, certPEM, keyPEM []by
 		return err
 	}
 	logger.Info("Logged in to UniFi", "operation", operation, "csrf_token_available", client.csrfToken != "")
-	operation = "upload"
-	logger.Info("Uploading certificate", "operation", operation)
-	id, err := client.UploadCertificate(ctx, name, certPEM, keyPEM)
+	operation = "list"
+	logger.Info("Checking existing certificates", "operation", operation)
+	certificates, err := client.ListCertificates(ctx)
 	if err != nil {
 		return err
 	}
-	logger = logger.With("certificate_id", id)
-	logger.Info("Certificate uploaded", "operation", operation)
-	operation = "activate"
-	logger.Info("Activating certificate", "operation", operation)
-	if err := client.ActivateCertificate(ctx, id); err != nil {
+	apiFingerprint := strings.ReplaceAll(fmt.Sprintf("% X", fingerprint), " ", ":")
+	existing, found, err := matchingCertificate(certificates, name, apiFingerprint)
+	if err != nil {
 		return err
 	}
-	logger.Info("Certificate activated", "operation", operation)
+	var id string
+	activate := false
+	if found {
+		if existing.ID == "" {
+			return fmt.Errorf("existing certificate %q omitted id", name)
+		}
+		id = existing.ID
+		logger = logger.With("certificate_id", id)
+		if existing.Active == nil || !*existing.Active {
+			activate = true
+		} else {
+			logger.Info("Existing certificate is already active", "operation", operation)
+		}
+	} else {
+		operation = "upload"
+		logger.Info("Uploading certificate", "operation", operation)
+		id, err = client.UploadCertificate(ctx, name, certPEM, keyPEM)
+		if err != nil {
+			return err
+		}
+		logger = logger.With("certificate_id", id)
+		logger.Info("Certificate uploaded", "operation", operation)
+		activate = true
+	}
+	if activate {
+		operation = "activate"
+		logger.Info("Activating certificate", "operation", operation)
+		if err := client.ActivateCertificate(ctx, id); err != nil {
+			return err
+		}
+		logger.Info("Certificate activated", "operation", operation)
+	}
 	operation = "cleanup"
 	if target.Cleanup {
 		if err := cleanupExpiredCertificates(ctx, client, target.ID, target.Name); err != nil {
@@ -106,6 +136,26 @@ func deployTarget(ctx context.Context, target TargetConfig, certPEM, keyPEM []by
 		}
 	}
 	return nil
+}
+
+func matchingCertificate(certificates []UniFiCertificate, name, fingerprint string) (UniFiCertificate, bool, error) {
+	var match UniFiCertificate
+	for _, certificate := range certificates {
+		if certificate.Name != name {
+			continue
+		}
+		if !strings.EqualFold(certificate.Fingerprint, fingerprint) {
+			return UniFiCertificate{}, false, fmt.Errorf("certificate name collision for %q: fingerprint is missing, malformed, or different", name)
+		}
+		if match.ID != "" || match.Name != "" {
+			return UniFiCertificate{}, false, fmt.Errorf("certificate name collision for %q: multiple matching certificates", name)
+		}
+		match = certificate
+	}
+	if match.Name == "" {
+		return UniFiCertificate{}, false, nil
+	}
+	return match, true, nil
 }
 
 func cleanupExpiredCertificates(ctx context.Context, client *UniFiClient, targetID, baseName string) error {

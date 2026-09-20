@@ -21,7 +21,7 @@ You can also supply credentials through `UNIFI_USERNAME` and `UNIFI_PASSWORD`, a
 
 Add `--cleanup` to remove expired, inactive certificates with the same configured name. Set the name with `--name`, or use `UNIFI_CLEANUP` and `UNIFI_CERT_NAME` for hooks and Docker. Cleanup is disabled by default. Run `bin/unifi-cert-upload --help` for the CLI options.
 
-Names combine the configured name, a space, and the first eight hexadecimal characters of the certificate's SHA-1 fingerprint: `--name 'deployer: unifi.example.com'` produces names such as `deployer: unifi.example.com d4ac8b21`.
+Names combine the configured name, a space, and the first eight hexadecimal characters of the certificate's SHA-1 fingerprint: `--name 'deployer: unifi.example.com'` produces names such as `deployer: unifi.example.com d4ac8b21`. Repeated runs reuse a record with the same name and full fingerprint, activating it if needed. A name collision with a different fingerprint is an error.
 
 ### Renewal hooks
 
@@ -62,7 +62,7 @@ UNIFI_PROTECT_CERT_NAME="deployer: protect"
 
 Export these variables for the CLI, or put them in `.env` for Docker. Target identifiers are case-insensitive and use letters, digits, and underscores; empty entries are ignored. Each target also supports `USERNAME`, `PASSWORD`, `HTTP_TIMEOUT`, `SKIP_TLS_VERIFY`, and `CLEANUP` settings under its own `UNIFI_<ID>_` name. Target settings use their own defaults; global single-target settings are not inherited.
 
-Lego's hook sends the certificate to every target whose `DOMAIN` exactly matches an entry in `LEGO_HOOK_CERT_DOMAINS`. Wildcards match literally. For the example above, set `LEGO_DOMAINS=unifi.home.example.com,protect.home.example.com`: lego creates one certificate covering both domains, and the hook uploads it to both consoles. Independent certificates need separate lego invocations.
+Lego's hook sends the certificate to every target whose `DOMAIN` exactly matches an entry in `LEGO_HOOK_CERT_DOMAINS`. Wildcards match literally. The Docker setup below supports both shared and independent certificates.
 
 Use `--target home` for a manual upload or retry to just that target, including with a Certbot hook:
 
@@ -70,11 +70,11 @@ Use `--target home` for a manual upload or retry to just that target, including 
 bin/unifi-cert-upload --target home --cert /path/to/cert.pem --key /path/to/key.pem
 ```
 
-Other selected targets are still attempted if one fails. Retry failed uploads individually; if upload succeeded but activation failed, activate the existing record in UniFi. Explicit `--name` and `--cleanup` flags override those settings for the selected targets.
+Other selected targets are still attempted if one fails. Rerunning the CLI skips certificates that are already active and retries incomplete deployments. Explicit `--name` and `--cleanup` flags override those settings for the selected targets.
 
 ## Automate with Docker and lego
 
-The included Compose setup handles Let's Encrypt certificates through DNS validation and deploys them to UniFi OS. It runs at startup and checks for renewal daily, keeping certificate state in a persistent volume.
+The included Compose setup handles Let's Encrypt certificates through DNS validation and deploys them to UniFi OS. It runs at startup and checks for renewal daily, keeping certificates and pending deployments in a persistent volume.
 
 Copy the example configuration:
 
@@ -99,7 +99,9 @@ docker compose logs -f unifi-os-le-cert-deployer
 
 Set `CRON_SCHEDULE` in `.env` to override the default daily schedule. Keep the `certificate_state` volume when recreating the container; `docker compose down -v` deletes it.
 
-If certificate issuance succeeds but deployment fails, retry the upload:
+The deploy hook copies the certificate and key into `/data/deploy/<job>/`. Successful deployment removes that pending copy. Pending deployments are retried at startup and after each scheduled lego run, even when renewal is skipped or fails.
+
+To retry a saved certificate manually, including an upload that failed before it was queued:
 
 ```sh
 docker compose run --rm --entrypoint /usr/local/bin/unifi-cert-upload \
@@ -107,3 +109,26 @@ docker compose run --rm --entrypoint /usr/local/bin/unifi-cert-upload \
   --cert /data/certificates/unifi.crt \
   --key /data/certificates/unifi.key
 ```
+
+### Independent or shared certificates
+
+For separate certificates and private keys in one container, add certificate jobs to `.env`:
+
+```dotenv
+LEGO_CERTIFICATES=home,protect
+LEGO_HOME_DOMAINS=unifi.home.example.com
+LEGO_PROTECT_DOMAINS=protect.home.example.com
+```
+
+Configure the upload targets as shown in **Multiple targets**. Each job's domain list determines which targets receive its certificate. Jobs share the ACME account and DNS provider settings; a failed job does not prevent the remaining jobs from running.
+
+For one certificate shared by both targets, use a single job:
+
+```dotenv
+LEGO_CERTIFICATES=shared
+LEGO_SHARED_DOMAINS=unifi.home.example.com,protect.home.example.com
+```
+
+Job identifiers are case-insensitive; empty entries are ignored. Each listed job requires `LEGO_<ID>_DOMAINS`; its identifier becomes the certificate's storage name, such as `/data/certificates/home.crt` and `home.key`. Keep identifiers stable to reuse saved certificates.
+
+Without `LEGO_CERTIFICATES`, the container uses `LEGO_DOMAINS` and `LEGO_CERT_NAME` for a single certificate. Compose defaults the storage name to `unifi`; outside Compose it defaults to the first domain.

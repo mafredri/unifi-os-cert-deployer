@@ -23,11 +23,15 @@ if ! printf '%s\n' "$schedule" | awk 'NF != 5 { exit 1 }'; then
 	exit 1
 fi
 
-printf '%s /lego run\n' "$schedule" > /etc/crontabs/root
+printf '%s /usr/local/bin/run-lego-jobs\n' "$schedule" > /etc/crontabs/root
 chmod 0600 /etc/crontabs/root
 
-if ! /lego run; then
-	printf '%s\n' 'Initial lego run failed. Cron will check renewal again; if deployment failed after issuance, retry unifi-cert-upload with the saved certificate and key.' >&2
+if ! /usr/local/bin/deploy-pending; then
+	printf '%s\n' 'Pending certificate deployments failed. Lego will still run.' >&2
+fi
+
+if ! /usr/local/bin/run-lego-jobs; then
+	printf '%s\n' 'Initial certificate jobs failed. Cron will retry them at the next scheduled run.' >&2
 fi
 
 exec crond -f -l 2

@@ -168,10 +168,11 @@ func TestListAndDeleteCertificates(t *testing.T) {
 			}
 			writeTestJSON(t, w, []map[string]any{
 				{
-					"id":       "expired/id",
-					"name":     "service: console old",
-					"valid_to": "2001-01-01T00:00:00Z",
-					"active":   false,
+					"id":          "expired/id",
+					"name":        "service: console old",
+					"fingerprint": "CA:BD:2A:79:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF",
+					"valid_to":    "2001-01-01T00:00:00Z",
+					"active":      false,
 				},
 			})
 		case http.MethodDelete:
@@ -190,6 +191,9 @@ func TestListAndDeleteCertificates(t *testing.T) {
 	}
 	if len(certificates) != 1 {
 		t.Fatalf("ListCertificates() returned %d certificates, want one", len(certificates))
+	}
+	if certificates[0].Fingerprint != "CA:BD:2A:79:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF" {
+		t.Errorf("fingerprint = %q, want the full API fingerprint", certificates[0].Fingerprint)
 	}
 	if certificates[0].Name != "service: console old" || certificates[0].Active == nil || *certificates[0].Active {
 		t.Fatalf("ListCertificates() = %+v, want the API certificate fields", certificates)

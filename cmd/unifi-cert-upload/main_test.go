@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,8 +37,8 @@ func TestRunCLIUploadsFileContentsOnce(t *testing.T) {
 	if !strings.HasPrefix(api.name, "fixture upload ") {
 		t.Errorf("uploaded name = %q, want configured name", api.name)
 	}
-	if api.certificateLists != 0 {
-		t.Errorf("certificate lists = %d with cleanup disabled, want zero", api.certificateLists)
+	if api.certificateLists != 1 {
+		t.Errorf("certificate lists = %d, want one before upload", api.certificateLists)
 	}
 }
 
@@ -96,11 +99,11 @@ func TestRunCLIDeploysMatchingTargetsWithIndependentSettings(t *testing.T) {
 	if protect.name != "protect cert cabd2a79" {
 		t.Errorf("protect uploaded name = %q, want independent configured name", protect.name)
 	}
-	if home.certificateLists != 1 {
-		t.Errorf("home cleanup requests = %d, want one", home.certificateLists)
+	if home.certificateLists != 2 {
+		t.Errorf("home certificate lists = %d, want ownership and cleanup checks", home.certificateLists)
 	}
-	if protect.certificateLists != 0 {
-		t.Errorf("protect cleanup requests = %d, want none", protect.certificateLists)
+	if protect.certificateLists != 1 {
+		t.Errorf("protect certificate lists = %d, want one before upload", protect.certificateLists)
 	}
 }
 
@@ -184,6 +187,63 @@ func TestRunCLIMultiTargetContinuesAfterTargetFailure(t *testing.T) {
 	}
 	if protect.activations != 1 {
 		t.Errorf("protect activations = %d, want one after home failure", protect.activations)
+	}
+}
+
+func TestRunCLIMultiTargetRetryDoesNotDuplicatePartialSuccesses(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	keyPEM := []byte("key")
+	home := &uploadAPIFixture{
+		wantCert:              string(certPEM),
+		wantKey:               string(keyPEM),
+		username:              "home-user",
+		password:              "home-password",
+		rejectActivationCount: 1,
+	}
+	protect := &uploadAPIFixture{
+		wantCert: string(certPEM),
+		wantKey:  string(keyPEM),
+		username: "protect-user",
+		password: "protect-password",
+	}
+	homeServer := httptest.NewServer(home)
+	defer homeServer.Close()
+	protectServer := httptest.NewServer(protect)
+	defer protectServer.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, keyPEM)
+	setUploadEnvironment(t, "http://global-settings-must-not-apply", certFile, keyFile)
+	t.Setenv("UNIFI_TARGETS", "home,protect")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "home.example,protect.example")
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "HOME",
+		Domain:          "home.example",
+		URL:             homeServer.URL,
+		Username:        "home-user",
+		Password:        "home-password",
+		CertificateName: "home cert",
+		Cleanup:         "false",
+	})
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "PROTECT",
+		Domain:          "protect.example",
+		URL:             protectServer.URL,
+		Username:        "protect-user",
+		Password:        "protect-password",
+		CertificateName: "protect cert",
+		Cleanup:         "false",
+	})
+
+	if err := runCLI(t.Context(), nil); err == nil || !strings.Contains(err.Error(), "target home") {
+		t.Fatalf("first runCLI() error = %v, want target-scoped activation failure", err)
+	}
+	if err := runCLI(t.Context(), nil); err != nil {
+		t.Fatalf("second runCLI() error = %v", err)
+	}
+	if home.uploads != 1 || home.activations != 2 {
+		t.Errorf("home calls = upload:%d activate:%d, want 1,2", home.uploads, home.activations)
+	}
+	if protect.uploads != 1 || protect.activations != 1 {
+		t.Errorf("protect calls = upload:%d activate:%d, want 1,1", protect.uploads, protect.activations)
 	}
 }
 
@@ -411,8 +471,8 @@ func TestRunCLICleanupUsesLiteralNameAsScope(t *testing.T) {
 	if err := runCLI(context.Background(), nil); err != nil {
 		t.Fatalf("runCLI() error = %v", err)
 	}
-	if api.certificateLists != 1 {
-		t.Fatalf("certificate lists = %d, want one with cleanup enabled", api.certificateLists)
+	if api.certificateLists != 2 {
+		t.Fatalf("certificate lists = %d, want ownership and cleanup checks", api.certificateLists)
 	}
 	want := []string{"/api/userCertificates/expired%2Fmatch"}
 	if fmt.Sprint(api.deletions) != fmt.Sprint(want) {
@@ -420,31 +480,25 @@ func TestRunCLICleanupUsesLiteralNameAsScope(t *testing.T) {
 	}
 }
 
-func TestRunCLIReturnsDuplicateRejectionWithoutRetry(t *testing.T) {
+func TestRunCLIRetriesFailedUploadOnNextInvocation(t *testing.T) {
 	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
-	api := &uploadAPIFixture{rejectDuplicate: true, wantCert: string(certPEM), wantKey: "opaque key"}
+	api := &uploadAPIFixture{rejectUploadCount: 1, wantCert: string(certPEM), wantKey: "opaque key"}
 	server := httptest.NewServer(api)
 	defer server.Close()
 
 	certFile, keyFile := writeCLIInputFiles(t, certPEM, []byte("opaque key"))
 	setUploadEnvironment(t, server.URL, certFile, keyFile)
-	if err := runCLI(context.Background(), nil); err != nil {
-		t.Fatalf("initial runCLI() error = %v", err)
+	if err := runCLI(context.Background(), nil); err == nil {
+		t.Fatal("first runCLI() succeeded despite upload rejection")
 	}
-	t.Setenv("UNIFI_CLEANUP", "true")
-
-	err := runCLI(context.Background(), nil)
-	if err == nil {
-		t.Fatal("runCLI() error = nil, want duplicate upload rejection")
+	if err := runCLI(context.Background(), nil); err != nil {
+		t.Fatalf("second runCLI() error = %v", err)
 	}
 	if api.logins != 2 || api.uploads != 2 || api.activations != 1 {
-		t.Errorf("API calls after rejection = login:%d upload:%d activate:%d, want 2,2,1", api.logins, api.uploads, api.activations)
+		t.Errorf("API calls after retry = login:%d upload:%d activate:%d, want 2,2,1", api.logins, api.uploads, api.activations)
 	}
-	if api.certificateLists != 0 {
-		t.Errorf("cleanup ran after upload rejection, with %d certificate list request(s)", api.certificateLists)
-	}
-	if strings.Contains(err.Error(), "fixture response body") {
-		t.Errorf("runCLI() exposed the API response body: %v", err)
+	if api.certificateLists != 2 {
+		t.Errorf("certificate lists = %d, want one before each upload attempt", api.certificateLists)
 	}
 }
 
@@ -463,8 +517,156 @@ func TestRunCLIDoesNotCleanUpWhenActivationFails(t *testing.T) {
 	if api.uploads != 1 || api.activations != 1 {
 		t.Fatalf("API calls before activation failure = upload:%d activate:%d, want one each", api.uploads, api.activations)
 	}
-	if api.certificateLists != 0 {
-		t.Fatalf("cleanup ran after activation rejection, with %d certificate list request(s)", api.certificateLists)
+	if api.certificateLists != 1 {
+		t.Fatalf("certificate lists = %d, want the initial ownership check", api.certificateLists)
+	}
+}
+
+func TestRunCLIReusesCertificateAfterActivationFailure(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	api := &uploadAPIFixture{
+		wantCert:              string(certPEM),
+		wantKey:               "key",
+		rejectActivationCount: 1,
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, []byte("key"))
+	setUploadEnvironment(t, server.URL, certFile, keyFile)
+
+	if err := runCLI(t.Context(), nil); err == nil {
+		t.Fatal("first runCLI() succeeded despite activation rejection")
+	}
+	if err := runCLI(t.Context(), nil); err != nil {
+		t.Fatalf("second runCLI() error = %v", err)
+	}
+	if api.uploads != 1 || api.activations != 2 || api.certificateLists != 2 {
+		t.Fatalf("API calls = upload:%d activate:%d list:%d, want 1,2,2", api.uploads, api.activations, api.certificateLists)
+	}
+}
+
+func TestRunCLIReusesCertificateAfterInvalidUploadResponse(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	api := &uploadAPIFixture{
+		wantCert:              string(certPEM),
+		wantKey:               "key",
+		invalidUploadResponse: true,
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, []byte("key"))
+	setUploadEnvironment(t, server.URL, certFile, keyFile)
+
+	if err := runCLI(t.Context(), nil); err == nil {
+		t.Fatal("first runCLI() succeeded despite an invalid upload response")
+	}
+	if err := runCLI(t.Context(), nil); err != nil {
+		t.Fatalf("second runCLI() error = %v", err)
+	}
+	if api.uploads != 1 || api.activations != 1 || api.certificateLists != 2 {
+		t.Fatalf("API calls = upload:%d activate:%d list:%d, want 1,1,2", api.uploads, api.activations, api.certificateLists)
+	}
+}
+
+func TestRunCLILeavesMatchingActiveCertificateUntouched(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	api := &uploadAPIFixture{
+		certificates: []UniFiCertificate{{
+			ID:          "existing",
+			Name:        fixtureCertificateName("fixture upload", certPEM),
+			Fingerprint: strings.ToLower(fixtureCertificateFingerprint(string(certPEM))),
+			Active:      fixtureBool(true),
+		}},
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, []byte("key"))
+	setUploadEnvironment(t, server.URL, certFile, keyFile)
+
+	if err := runCLI(t.Context(), nil); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+	if api.uploads != 0 || api.activations != 0 || len(api.deletions) != 0 {
+		t.Fatalf("API mutations = upload:%d activate:%d delete:%d, want none", api.uploads, api.activations, len(api.deletions))
+	}
+}
+
+func TestRunCLIRejectsMatchingCertificateWithoutID(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	api := &uploadAPIFixture{certificates: []UniFiCertificate{{
+		Name:        fixtureCertificateName("fixture upload", certPEM),
+		Fingerprint: fixtureCertificateFingerprint(string(certPEM)),
+		Active:      fixtureBool(false),
+	}}}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, []byte("key"))
+	setUploadEnvironment(t, server.URL, certFile, keyFile)
+
+	err := runCLI(t.Context(), nil)
+	if err == nil || !strings.Contains(err.Error(), "omitted id") {
+		t.Fatalf("runCLI() error = %v, want missing id error", err)
+	}
+	if api.uploads != 0 || api.activations != 0 {
+		t.Fatalf("matching certificate without an id mutated API: upload:%d activate:%d", api.uploads, api.activations)
+	}
+}
+
+func TestRunCLIRejectsCertificateNameCollisions(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	name := fixtureCertificateName("fixture upload", certPEM)
+	fingerprint := fixtureCertificateFingerprint(string(certPEM))
+	differentFingerprint := fingerprint[:len(fingerprint)-2] + "00"
+	if strings.HasSuffix(fingerprint, "00") {
+		differentFingerprint = fingerprint[:len(fingerprint)-2] + "FF"
+	}
+	for _, fingerprint := range []string{differentFingerprint, "", "not-a-fingerprint"} {
+		t.Run(fingerprint, func(t *testing.T) {
+			api := &uploadAPIFixture{certificates: []UniFiCertificate{{
+				ID:          "collision",
+				Name:        name,
+				Fingerprint: fingerprint,
+				Active:      fixtureBool(false),
+			}}}
+			server := httptest.NewServer(api)
+			defer server.Close()
+			certFile, keyFile := writeCLIInputFiles(t, certPEM, []byte("key"))
+			setUploadEnvironment(t, server.URL, certFile, keyFile)
+			t.Setenv("UNIFI_CLEANUP", "true")
+
+			err := runCLI(t.Context(), nil)
+			if err == nil || !strings.Contains(err.Error(), "certificate name collision") {
+				t.Fatalf("runCLI() error = %v, want collision error", err)
+			}
+			if api.uploads != 0 || api.activations != 0 || len(api.deletions) != 0 {
+				t.Fatalf("collision mutations = upload:%d activate:%d delete:%d, want none", api.uploads, api.activations, len(api.deletions))
+			}
+		})
+	}
+}
+
+func TestRunCLICleanupDoesNotDeleteReactivatedCertificate(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	api := &uploadAPIFixture{certificates: []UniFiCertificate{{
+		ID:          "expired-existing",
+		Name:        fixtureCertificateName("fixture upload", certPEM),
+		Fingerprint: fixtureCertificateFingerprint(string(certPEM)),
+		ValidTo:     "2001-01-01T00:00:00Z",
+		Active:      fixtureBool(false),
+	}}}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, []byte("key"))
+	setUploadEnvironment(t, server.URL, certFile, keyFile)
+	t.Setenv("UNIFI_CLEANUP", "true")
+
+	if err := runCLI(t.Context(), nil); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+	for _, deletion := range api.deletions {
+		if deletion == "/api/userCertificates/expired-existing" {
+			t.Fatalf("cleanup deleted the certificate activated in this run: %q", deletion)
+		}
 	}
 }
 
@@ -571,20 +773,24 @@ func setTargetUploadEnvironment(t *testing.T, target targetUploadEnvironment) {
 }
 
 type uploadAPIFixture struct {
-	logins           int
-	uploads          int
-	activations      int
-	certificateLists int
-	rejectDuplicate  bool
-	rejectActivation bool
-	wantCert         string
-	wantKey          string
-	username         string
-	password         string
-	name             string
-	cleanupName      string
-	deletions        []string
-	afterActivation  func()
+	logins                int
+	uploads               int
+	activations           int
+	certificateLists      int
+	rejectDuplicate       bool
+	rejectUploadCount     int
+	rejectActivation      bool
+	rejectActivationCount int
+	invalidUploadResponse bool
+	wantCert              string
+	wantKey               string
+	username              string
+	password              string
+	name                  string
+	cleanupName           string
+	deletions             []string
+	certificates          []UniFiCertificate
+	afterActivation       func()
 }
 
 func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -637,12 +843,29 @@ func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "file bytes changed before upload", http.StatusBadRequest)
 			return
 		}
+		if api.rejectUploadCount > 0 {
+			api.rejectUploadCount--
+			http.Error(w, "fixture response body", http.StatusConflict)
+			return
+		}
 		if api.rejectDuplicate && upload.Name == api.name {
 			http.Error(w, "fixture response body", http.StatusConflict)
 			return
 		}
 		api.name = upload.Name
-		writeFixtureJSON(w, map[string]string{"id": fmt.Sprintf("fixture/id-%d", api.uploads)})
+		id := fmt.Sprintf("fixture/id-%d", api.uploads)
+		api.certificates = append(api.certificates, UniFiCertificate{
+			ID:          id,
+			Name:        upload.Name,
+			Fingerprint: fixtureCertificateFingerprint(upload.Cert),
+			Active:      fixtureBool(false),
+		})
+		if api.invalidUploadResponse {
+			api.invalidUploadResponse = false
+			writeFixtureJSON(w, map[string]string{"name": upload.Name})
+			return
+		}
+		writeFixtureJSON(w, map[string]string{"id": id})
 
 	case r.Method == http.MethodPut && strings.HasSuffix(r.URL.EscapedPath(), "/status"):
 		api.activations++
@@ -653,9 +876,21 @@ func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "expected activation", http.StatusBadRequest)
 			return
 		}
+		if api.rejectActivationCount > 0 {
+			api.rejectActivationCount--
+			http.Error(w, "activation rejected", http.StatusBadGateway)
+			return
+		}
 		if api.rejectActivation {
 			http.Error(w, "activation rejected", http.StatusBadGateway)
 			return
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.EscapedPath(), "/api/userCertificates/"), "/status")
+		id, _ = url.PathUnescape(id)
+		for index := range api.certificates {
+			if api.certificates[index].ID == id {
+				api.certificates[index].Active = fixtureBool(true)
+			}
 		}
 		if api.afterActivation != nil {
 			api.afterActivation()
@@ -665,16 +900,18 @@ func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/userCertificates":
 		api.certificateLists++
 		baseName := api.cleanupName
-		writeFixtureJSON(w, []map[string]any{
-			{"id": "expired/match", "name": baseName + " old", "valid_to": "2001-01-01T00:00:00Z", "active": false},
-			{"id": "expired/regex-neighbor", "name": strings.Replace(baseName, "[prod]", "xprod]", 1) + " old", "valid_to": "2001-01-01T00:00:00Z", "active": false},
-			{"id": "expired/no-suffix", "name": baseName + " ", "valid_to": "2001-01-01T00:00:00Z", "active": false},
-			{"id": "expired/active", "name": baseName + " active", "valid_to": "2001-01-01T00:00:00Z", "active": true},
-			{"id": "future/inactive", "name": baseName + " future", "valid_to": "2999-01-01T00:00:00Z", "active": false},
-			{"id": "invalid/expiry", "name": baseName + " invalid", "valid_to": "bad-date", "active": false},
-			{"id": "unmanaged", "name": "other service old", "valid_to": "2001-01-01T00:00:00Z", "active": false},
-			{"id": "unknown/active", "name": baseName + " unknown", "valid_to": "2001-01-01T00:00:00Z"},
-		})
+		certificates := append([]UniFiCertificate(nil), api.certificates...)
+		certificates = append(certificates, []UniFiCertificate{
+			{ID: "expired/match", Name: baseName + " old", ValidTo: "2001-01-01T00:00:00Z", Active: fixtureBool(false)},
+			{ID: "expired/regex-neighbor", Name: strings.Replace(baseName, "[prod]", "xprod]", 1) + " old", ValidTo: "2001-01-01T00:00:00Z", Active: fixtureBool(false)},
+			{ID: "expired/no-suffix", Name: baseName + " ", ValidTo: "2001-01-01T00:00:00Z", Active: fixtureBool(false)},
+			{ID: "expired/active", Name: baseName + " active", ValidTo: "2001-01-01T00:00:00Z", Active: fixtureBool(true)},
+			{ID: "future/inactive", Name: baseName + " future", ValidTo: "2999-01-01T00:00:00Z", Active: fixtureBool(false)},
+			{ID: "invalid/expiry", Name: baseName + " invalid", ValidTo: "bad-date", Active: fixtureBool(false)},
+			{ID: "unmanaged", Name: "other service old", ValidTo: "2001-01-01T00:00:00Z", Active: fixtureBool(false)},
+			{ID: "unknown/active", Name: baseName + " unknown", ValidTo: "2001-01-01T00:00:00Z"},
+		}...)
+		writeFixtureJSON(w, certificates)
 
 	case r.Method == http.MethodDelete:
 		api.deletions = append(api.deletions, r.URL.EscapedPath())
@@ -683,6 +920,32 @@ func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func fixtureCertificateFingerprint(certificate string) string {
+	block, _ := pem.Decode([]byte(certificate))
+	if block == nil {
+		return ""
+	}
+	fingerprint := sha1.Sum(block.Bytes)
+	parts := make([]string, len(fingerprint))
+	for index, value := range fingerprint {
+		parts[index] = fmt.Sprintf("%02X", value)
+	}
+	return strings.Join(parts, ":")
+}
+
+func fixtureCertificateName(baseName string, certificate []byte) string {
+	block, _ := pem.Decode(certificate)
+	if block == nil {
+		return ""
+	}
+	fingerprint := sha1.Sum(block.Bytes)
+	return fmt.Sprintf("%s %x", baseName, fingerprint[:4])
+}
+
+func fixtureBool(value bool) *bool {
+	return &value
 }
 
 func writeFixtureJSON(w http.ResponseWriter, value any) {

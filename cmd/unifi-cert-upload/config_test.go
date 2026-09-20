@@ -27,6 +27,8 @@ func setValidConfigEnvironment(t *testing.T) {
 		"LEGO_HOOK_CERT_KEY_PATH": "/lego/certificates/example.key",
 		"RENEWED_LINEAGE":         "",
 		"UNIFI_CERT_NAME":         "",
+		"UNIFI_TARGETS":           "",
+		"LEGO_HOOK_CERT_DOMAINS":  "",
 	} {
 		t.Setenv(name, value)
 	}
@@ -43,14 +45,15 @@ func TestLoadConfigUsesHookEnvironmentAndUniFiDefaults(t *testing.T) {
 	if got.CertFile != "/lego/certificates/example.crt" || got.KeyFile != "/lego/certificates/example.key" {
 		t.Errorf("certificate paths = (%q, %q), want the paths from lego hook environment", got.CertFile, got.KeyFile)
 	}
-	if got.Name != "unifi-os-le-cert-deployer" || got.Cleanup {
-		t.Errorf("name/cleanup = (%q, %t), want default name and disabled cleanup", got.Name, got.Cleanup)
+	target := onlyConfiguredTarget(t, got)
+	if target.Name != "unifi-os-le-cert-deployer" || target.Cleanup {
+		t.Errorf("name/cleanup = (%q, %t), want default name and disabled cleanup", target.Name, target.Cleanup)
 	}
-	if got.UniFi.URL != "http://console.local" || got.UniFi.Username != "admin" || got.UniFi.Password != "console-password" {
-		t.Errorf("UniFi settings not loaded correctly: URL=%q username=%q", got.UniFi.URL, got.UniFi.Username)
+	if target.UniFi.URL != "http://console.local" || target.UniFi.Username != "admin" || target.UniFi.Password != "console-password" {
+		t.Errorf("UniFi settings not loaded correctly: URL=%q username=%q", target.UniFi.URL, target.UniFi.Username)
 	}
-	if got.UniFi.HTTPTimeout != 30*time.Second || got.UniFi.SkipTLSVerify {
-		t.Errorf("UniFi HTTP settings = (%s, %t), want (30s, false)", got.UniFi.HTTPTimeout, got.UniFi.SkipTLSVerify)
+	if target.UniFi.HTTPTimeout != 30*time.Second || target.UniFi.SkipTLSVerify {
+		t.Errorf("UniFi HTTP settings = (%s, %t), want (30s, false)", target.UniFi.HTTPTimeout, target.UniFi.SkipTLSVerify)
 	}
 }
 
@@ -75,8 +78,9 @@ func TestLoadConfigFlagsOverrideHookEnvironment(t *testing.T) {
 	if got.CertFile != "/cli/cert.pem" || got.KeyFile != "/cli/key.pem" {
 		t.Errorf("certificate paths = (%q, %q), want CLI paths", got.CertFile, got.KeyFile)
 	}
-	if got.Name != "cli-name: $host 100%" || got.Cleanup {
-		t.Errorf("name/cleanup = (%q, %t), want literal CLI name and cleanup override", got.Name, got.Cleanup)
+	target := onlyConfiguredTarget(t, got)
+	if target.Name != "cli-name: $host 100%" || target.Cleanup {
+		t.Errorf("name/cleanup = (%q, %t), want literal CLI name and cleanup override", target.Name, target.Cleanup)
 	}
 }
 
@@ -177,7 +181,7 @@ func TestLoadConfigUsesCleanupEnvironmentAndFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	if !got.Cleanup {
+	if !onlyConfiguredTarget(t, got).Cleanup {
 		t.Fatal("LoadConfig() ignored UNIFI_CLEANUP=true")
 	}
 
@@ -186,7 +190,7 @@ func TestLoadConfigUsesCleanupEnvironmentAndFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig(--cleanup) error = %v", err)
 	}
-	if !got.Cleanup {
+	if !onlyConfiguredTarget(t, got).Cleanup {
 		t.Fatal("LoadConfig(--cleanup) did not enable cleanup")
 	}
 }
@@ -213,8 +217,9 @@ func TestLoadConfigReadsUniFiSecretFilesAndTrimsOnlyLineEndings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	if got.UniFi.Username != "file-admin" || got.UniFi.Password != "file-password " {
-		t.Errorf("UniFi credentials = (%q, %q), want file contents with only line endings removed", got.UniFi.Username, got.UniFi.Password)
+	target := onlyConfiguredTarget(t, got)
+	if target.UniFi.Username != "file-admin" || target.UniFi.Password != "file-password " {
+		t.Errorf("UniFi credentials = (%q, %q), want file contents with only line endings removed", target.UniFi.Username, target.UniFi.Password)
 	}
 }
 
@@ -270,8 +275,9 @@ func TestLoadConfigValidatesUniFiURLTimeoutAndTLSSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	if got.UniFi.URL != "http://127.0.0.1:8443" || got.UniFi.HTTPTimeout != 2*time.Minute || !got.UniFi.SkipTLSVerify {
-		t.Errorf("UniFi settings = (%q, %s, %t), want configured URL, 2m, true", got.UniFi.URL, got.UniFi.HTTPTimeout, got.UniFi.SkipTLSVerify)
+	target := onlyConfiguredTarget(t, got)
+	if target.UniFi.URL != "http://127.0.0.1:8443" || target.UniFi.HTTPTimeout != 2*time.Minute || !target.UniFi.SkipTLSVerify {
+		t.Errorf("UniFi settings = (%q, %s, %t), want configured URL, 2m, true", target.UniFi.URL, target.UniFi.HTTPTimeout, target.UniFi.SkipTLSVerify)
 	}
 
 	for _, timeout := range []string{"0s", "-1s", "not-a-duration"} {
@@ -309,4 +315,197 @@ func TestLoadConfigRejectsUnexpectedPositionalArguments(t *testing.T) {
 	if _, err := LoadConfig([]string{"unexpected"}); err == nil {
 		t.Fatal("LoadConfig() accepted a positional argument")
 	}
+}
+
+func TestLoadConfigSelectsConfiguredTargetsByLiteralHookDomain(t *testing.T) {
+	setValidConfigEnvironment(t)
+	t.Setenv("UNIFI_TARGETS", " HOME , , Protect ")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "home.example, *")
+	t.Setenv("UNIFI_CERT_NAME", "global-name-must-not-apply")
+	setConfiguredTarget(t, configuredTargetEnvironment{
+		ID:       "HOME",
+		Domain:   "home.example",
+		URL:      "http://home.local",
+		Username: "home-user",
+		Password: "home-password",
+	})
+	setConfiguredTarget(t, configuredTargetEnvironment{
+		ID:       "PROTECT",
+		Domain:   "*",
+		URL:      "http://protect.local",
+		Username: "protect-user",
+		Password: "protect-password",
+	})
+	t.Setenv("UNIFI_HOME_CERT_NAME", "home-name")
+	t.Setenv("UNIFI_HOME_CLEANUP", "true")
+	t.Setenv("UNIFI_PROTECT_CERT_NAME", "protect-name")
+
+	got, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if len(got.Targets) != 2 {
+		t.Fatalf("configured targets = %d, want two", len(got.Targets))
+	}
+	home, protect := got.Targets[0], got.Targets[1]
+	if home.ID != "home" {
+		t.Errorf("home ID = %q, want home", home.ID)
+	}
+	if home.UniFi.URL != "http://home.local" {
+		t.Errorf("home URL = %q, want configured URL", home.UniFi.URL)
+	}
+	if home.UniFi.Username != "home-user" {
+		t.Error("home target did not load its username")
+	}
+	if home.Name != "home-name" || !home.Cleanup {
+		t.Errorf("home name/cleanup = (%q, %t), want (home-name, true)", home.Name, home.Cleanup)
+	}
+	if protect.ID != "protect" {
+		t.Errorf("protect ID = %q, want protect", protect.ID)
+	}
+	if protect.UniFi.URL != "http://protect.local" {
+		t.Errorf("protect URL = %q, want configured URL", protect.UniFi.URL)
+	}
+	if protect.UniFi.Username != "protect-user" {
+		t.Error("protect target did not load its username")
+	}
+	if protect.Name != "protect-name" || protect.Cleanup {
+		t.Errorf("protect name/cleanup = (%q, %t), want (protect-name, false)", protect.Name, protect.Cleanup)
+	}
+}
+
+func TestLoadConfigRejectsInvalidOrDuplicateTargetIDs(t *testing.T) {
+	for _, value := range []string{"home,HOME", "home,protect!", "home,home"} {
+		t.Run(value, func(t *testing.T) {
+			setValidConfigEnvironment(t)
+			t.Setenv("UNIFI_TARGETS", value)
+			if _, err := LoadConfig(nil); err == nil {
+				t.Fatalf("LoadConfig() accepted UNIFI_TARGETS=%q", value)
+			}
+		})
+	}
+}
+
+func TestLoadConfigExplicitTargetBypassesHookDomainsAndLoadsOnlyIt(t *testing.T) {
+	setValidConfigEnvironment(t)
+	t.Setenv("UNIFI_TARGETS", "home,,protect")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "")
+	setConfiguredTarget(t, configuredTargetEnvironment{
+		ID:       "HOME",
+		Domain:   "home.example",
+		URL:      "http://home.local",
+		Username: "home-user",
+		Password: "home-password",
+	})
+	t.Setenv("UNIFI_PROTECT_USERNAME", "")
+	t.Setenv("UNIFI_PROTECT_PASSWORD", "")
+	got, err := LoadConfig([]string{"--target", "HOME"})
+	if err != nil {
+		t.Fatalf("LoadConfig(--target home) error = %v", err)
+	}
+	target := onlyConfiguredTarget(t, got)
+	if target.ID != "home" {
+		t.Errorf("explicit target ID = %q, want home", target.ID)
+	}
+	if target.UniFi.Username != "home-user" {
+		t.Error("explicit target did not load home credentials")
+	}
+	if _, err := LoadConfig([]string{"--target", "missing"}); err == nil {
+		t.Fatal("LoadConfig() accepted an unknown target")
+	}
+}
+
+func TestLoadConfigUsesSingleTargetForOnlyEmptyTargetEntries(t *testing.T) {
+	setValidConfigEnvironment(t)
+	t.Setenv("UNIFI_TARGETS", " , , ")
+	got, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatalf("LoadConfig() with empty target entries error = %v", err)
+	}
+	target := onlyConfiguredTarget(t, got)
+	if target.ID != "" {
+		t.Errorf("target ID = %q, want the single-target ID", target.ID)
+	}
+	if target.UniFi.URL != "http://console.local" {
+		t.Error("empty target entries did not use single-target settings")
+	}
+}
+
+func TestLoadConfigRejectsTargetFlagWithoutTargetMode(t *testing.T) {
+	setValidConfigEnvironment(t)
+	if _, err := LoadConfig([]string{"--target", "home"}); err == nil {
+		t.Fatal("LoadConfig() accepted --target without UNIFI_TARGETS")
+	}
+}
+
+func TestLoadConfigRejectsUnmatchedTargetDomains(t *testing.T) {
+	setValidConfigEnvironment(t)
+	t.Setenv("UNIFI_TARGETS", "home")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "other.example")
+	setConfiguredTarget(t, configuredTargetEnvironment{
+		ID:       "HOME",
+		Domain:   "home.example",
+		URL:      "http://home.local",
+		Username: "home-user",
+		Password: "home-password",
+	})
+	if _, err := LoadConfig(nil); err == nil {
+		t.Fatal("LoadConfig() accepted hook domains without a configured match")
+	}
+}
+
+func TestLoadConfigFlagsOverrideSelectedTargetSettings(t *testing.T) {
+	setValidConfigEnvironment(t)
+	t.Setenv("UNIFI_TARGETS", "home")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "other.example")
+	setConfiguredTarget(t, configuredTargetEnvironment{
+		ID:       "HOME",
+		Domain:   "home.example",
+		URL:      "http://home.local",
+		Username: "home-user",
+		Password: "home-password",
+	})
+	got, err := LoadConfig([]string{"--target=home", "--name", "cli-name", "--cleanup=false"})
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	target := onlyConfiguredTarget(t, got)
+	if target.Name != "cli-name" || target.Cleanup {
+		t.Errorf("target overrides = (%q, %t), want (cli-name, false)", target.Name, target.Cleanup)
+	}
+}
+
+type configuredTargetEnvironment struct {
+	ID       string
+	Domain   string
+	URL      string
+	Username string
+	Password string
+}
+
+func setConfiguredTarget(t *testing.T, target configuredTargetEnvironment) {
+	t.Helper()
+	envBase := "UNIFI_" + target.ID
+	for name, value := range map[string]string{
+		envBase + "_DOMAIN":          target.Domain,
+		envBase + "_URL":             target.URL,
+		envBase + "_USERNAME":        target.Username,
+		envBase + "_USERNAME_FILE":   "",
+		envBase + "_PASSWORD":        target.Password,
+		envBase + "_PASSWORD_FILE":   "",
+		envBase + "_HTTP_TIMEOUT":    "",
+		envBase + "_SKIP_TLS_VERIFY": "",
+		envBase + "_CERT_NAME":       "",
+		envBase + "_CLEANUP":         "",
+	} {
+		t.Setenv(name, value)
+	}
+}
+
+func onlyConfiguredTarget(t *testing.T, cfg Config) TargetConfig {
+	t.Helper()
+	if len(cfg.Targets) != 1 {
+		t.Fatalf("configured targets = %d, want one", len(cfg.Targets))
+	}
+	return cfg.Targets[0]
 }

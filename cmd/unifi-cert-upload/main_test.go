@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -38,6 +39,211 @@ func TestRunCLIUploadsFileContentsOnce(t *testing.T) {
 	}
 }
 
+func TestRunCLIDeploysMatchingTargetsWithIndependentSettings(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	keyPEM := []byte("same certificate key bytes")
+	home := &uploadAPIFixture{
+		wantCert: string(certPEM),
+		wantKey:  string(keyPEM),
+		username: "home-user",
+		password: "home-password",
+	}
+	protect := &uploadAPIFixture{
+		wantCert: string(certPEM),
+		wantKey:  string(keyPEM),
+		username: "protect-user",
+		password: "protect-password",
+	}
+	homeServer := httptest.NewServer(home)
+	defer homeServer.Close()
+	protectServer := httptest.NewServer(protect)
+	defer protectServer.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, keyPEM)
+	setUploadEnvironment(t, "http://global-settings-must-not-apply", certFile, keyFile)
+	t.Setenv("UNIFI_TARGETS", "home,protect")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "home.example, protect.example")
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "HOME",
+		Domain:          "home.example",
+		URL:             homeServer.URL,
+		Username:        "home-user",
+		Password:        "home-password",
+		CertificateName: "home cert",
+		Cleanup:         "true",
+	})
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "PROTECT",
+		Domain:          "protect.example",
+		URL:             protectServer.URL,
+		Username:        "protect-user",
+		Password:        "protect-password",
+		CertificateName: "protect cert",
+		Cleanup:         "false",
+	})
+
+	if err := runCLI(t.Context(), nil); err != nil {
+		t.Fatalf("runCLI() error = %v", err)
+	}
+	if home.logins != 1 || home.uploads != 1 || home.activations != 1 {
+		t.Errorf("home API calls = login:%d upload:%d activate:%d, want one each", home.logins, home.uploads, home.activations)
+	}
+	if protect.logins != 1 || protect.uploads != 1 || protect.activations != 1 {
+		t.Errorf("protect API calls = login:%d upload:%d activate:%d, want one each", protect.logins, protect.uploads, protect.activations)
+	}
+	if home.name != "home cert cabd2a79" {
+		t.Errorf("home uploaded name = %q, want independent configured name", home.name)
+	}
+	if protect.name != "protect cert cabd2a79" {
+		t.Errorf("protect uploaded name = %q, want independent configured name", protect.name)
+	}
+	if home.certificateLists != 1 {
+		t.Errorf("home cleanup requests = %d, want one", home.certificateLists)
+	}
+	if protect.certificateLists != 0 {
+		t.Errorf("protect cleanup requests = %d, want none", protect.certificateLists)
+	}
+}
+
+func TestRunCLIMultiTargetMakesNoRequestsForUnmatchedDomains(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	api := &uploadAPIFixture{}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, []byte("key"))
+	setUploadEnvironment(t, server.URL, certFile, keyFile)
+	t.Setenv("UNIFI_TARGETS", "home")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "other.example")
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "HOME",
+		Domain:          "home.example",
+		URL:             server.URL,
+		Username:        "home-user",
+		Password:        "home-password",
+		CertificateName: "home cert",
+		Cleanup:         "false",
+	})
+
+	if err := runCLI(t.Context(), nil); err == nil {
+		t.Fatal("runCLI() succeeded without a matching configured target")
+	}
+	if api.logins != 0 || api.uploads != 0 || api.activations != 0 || api.certificateLists != 0 {
+		t.Errorf("API calls = login:%d upload:%d activate:%d list:%d, want none", api.logins, api.uploads, api.activations, api.certificateLists)
+	}
+}
+
+func TestRunCLIMultiTargetContinuesAfterTargetFailure(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	keyPEM := []byte("key")
+	home := &uploadAPIFixture{
+		wantCert:        string(certPEM),
+		wantKey:         string(keyPEM),
+		username:        "home-user",
+		password:        "home-password",
+		rejectDuplicate: true,
+		name:            "home cert cabd2a79",
+	}
+	protect := &uploadAPIFixture{
+		wantCert: string(certPEM),
+		wantKey:  string(keyPEM),
+		username: "protect-user",
+		password: "protect-password",
+	}
+	homeServer := httptest.NewServer(home)
+	defer homeServer.Close()
+	protectServer := httptest.NewServer(protect)
+	defer protectServer.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, keyPEM)
+	setUploadEnvironment(t, "http://global-settings-must-not-apply", certFile, keyFile)
+	t.Setenv("UNIFI_TARGETS", "home,protect")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "home.example,protect.example")
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "HOME",
+		Domain:          "home.example",
+		URL:             homeServer.URL,
+		Username:        "home-user",
+		Password:        "home-password",
+		CertificateName: "home cert",
+		Cleanup:         "false",
+	})
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "PROTECT",
+		Domain:          "protect.example",
+		URL:             protectServer.URL,
+		Username:        "protect-user",
+		Password:        "protect-password",
+		CertificateName: "protect cert",
+		Cleanup:         "false",
+	})
+
+	err := runCLI(t.Context(), nil)
+	if err == nil || !strings.Contains(err.Error(), "target home") {
+		t.Fatalf("runCLI() error = %v, want target-scoped home failure", err)
+	}
+	if home.activations != 0 {
+		t.Errorf("home activations = %d, want none after upload failure", home.activations)
+	}
+	if protect.activations != 1 {
+		t.Errorf("protect activations = %d, want one after home failure", protect.activations)
+	}
+}
+
+func TestRunCLIMultiTargetStopsAfterCancellation(t *testing.T) {
+	certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+	keyPEM := []byte("key")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	home := &uploadAPIFixture{
+		wantCert:        string(certPEM),
+		wantKey:         string(keyPEM),
+		username:        "home-user",
+		password:        "home-password",
+		afterActivation: cancel,
+	}
+	protect := &uploadAPIFixture{
+		wantCert: string(certPEM),
+		wantKey:  string(keyPEM),
+		username: "protect-user",
+		password: "protect-password",
+	}
+	homeServer := httptest.NewServer(home)
+	defer homeServer.Close()
+	protectServer := httptest.NewServer(protect)
+	defer protectServer.Close()
+	certFile, keyFile := writeCLIInputFiles(t, certPEM, keyPEM)
+	setUploadEnvironment(t, "http://global-settings-must-not-apply", certFile, keyFile)
+	t.Setenv("UNIFI_TARGETS", "home,protect")
+	t.Setenv("LEGO_HOOK_CERT_DOMAINS", "home.example,protect.example")
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "HOME",
+		Domain:          "home.example",
+		URL:             homeServer.URL,
+		Username:        "home-user",
+		Password:        "home-password",
+		CertificateName: "home cert",
+		Cleanup:         "false",
+	})
+	setTargetUploadEnvironment(t, targetUploadEnvironment{
+		ID:              "PROTECT",
+		Domain:          "protect.example",
+		URL:             protectServer.URL,
+		Username:        "protect-user",
+		Password:        "protect-password",
+		CertificateName: "protect cert",
+		Cleanup:         "false",
+	})
+
+	err := runCLI(ctx, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runCLI() error = %v, want context cancellation", err)
+	}
+	if home.activations != 1 {
+		t.Errorf("home activations = %d, want one before cancellation", home.activations)
+	}
+	if protect.logins != 0 {
+		t.Errorf("protect logins = %d, want no deployment after cancellation", protect.logins)
+	}
+}
+
 func TestRunCLILogsOperationsWithoutSecrets(t *testing.T) {
 	for _, tt := range []struct {
 		name           string
@@ -47,8 +253,20 @@ func TestRunCLILogsOperationsWithoutSecrets(t *testing.T) {
 		absentMessages []string
 	}{
 		{
-			name: "deployment with cleanup", cleanup: true,
-			wantMessages: []string{"Logging in to UniFi", "Logged in to UniFi", "csrf_token_available=true", "Uploading certificate", "Certificate uploaded", "Activating certificate", "Certificate activated", "Expired certificate deleted", "Certificate cleanup completed", "deleted=1"},
+			name:    "deployment with cleanup",
+			cleanup: true,
+			wantMessages: []string{
+				"Logging in to UniFi",
+				"Logged in to UniFi",
+				"csrf_token_available=true",
+				"Uploading certificate",
+				"Certificate uploaded",
+				"Activating certificate",
+				"Certificate activated",
+				"Expired certificate deleted",
+				"Certificate cleanup completed",
+				"deleted=1",
+			},
 		},
 		{
 			name:           "deployment without cleanup",
@@ -56,8 +274,15 @@ func TestRunCLILogsOperationsWithoutSecrets(t *testing.T) {
 			absentMessages: []string{"Checking expired certificates"},
 		},
 		{
-			name: "upload rejected", cleanup: true, rejectUpload: true,
-			wantMessages:   []string{"Uploading certificate", "Certificate operation failed", "operation=upload", "409 Conflict"},
+			name:         "upload rejected",
+			cleanup:      true,
+			rejectUpload: true,
+			wantMessages: []string{
+				"Uploading certificate",
+				"Certificate operation failed",
+				"operation=upload",
+				"409 Conflict",
+			},
 			absentMessages: []string{"Certificate uploaded", "Activating certificate", "Checking expired certificates"},
 		},
 	} {
@@ -69,9 +294,11 @@ func TestRunCLILogsOperationsWithoutSecrets(t *testing.T) {
 			certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
 			keyPEM := []byte("private-key-secret-marker")
 			api := &uploadAPIFixture{
-				wantCert: string(certPEM), wantKey: string(keyPEM),
-				cleanupName: "fixture [prod]", rejectDuplicate: tt.rejectUpload,
-				name: "fixture [prod] cabd2a79",
+				wantCert:        string(certPEM),
+				wantKey:         string(keyPEM),
+				cleanupName:     "fixture [prod]",
+				rejectDuplicate: tt.rejectUpload,
+				name:            "fixture [prod] cabd2a79",
 			}
 			server := httptest.NewServer(api)
 			defer server.Close()
@@ -307,8 +534,39 @@ func setUploadEnvironment(t *testing.T, serverURL, certFile, keyFile string) {
 		"LEGO_HOOK_CERT_KEY_PATH": keyFile,
 		"RENEWED_LINEAGE":         "",
 		"UNIFI_CERT_NAME":         "fixture upload",
+		"UNIFI_TARGETS":           "",
+		"LEGO_HOOK_CERT_DOMAINS":  "",
 	} {
 		t.Setenv(name, value)
+	}
+}
+
+type targetUploadEnvironment struct {
+	ID              string
+	Domain          string
+	URL             string
+	Username        string
+	Password        string
+	CertificateName string
+	Cleanup         string
+}
+
+func setTargetUploadEnvironment(t *testing.T, target targetUploadEnvironment) {
+	t.Helper()
+	envBase := "UNIFI_" + target.ID
+	for variable, value := range map[string]string{
+		envBase + "_DOMAIN":          target.Domain,
+		envBase + "_URL":             target.URL,
+		envBase + "_USERNAME":        target.Username,
+		envBase + "_USERNAME_FILE":   "",
+		envBase + "_PASSWORD":        target.Password,
+		envBase + "_PASSWORD_FILE":   "",
+		envBase + "_HTTP_TIMEOUT":    "",
+		envBase + "_SKIP_TLS_VERIFY": "",
+		envBase + "_CERT_NAME":       target.CertificateName,
+		envBase + "_CLEANUP":         target.Cleanup,
+	} {
+		t.Setenv(variable, value)
 	}
 }
 
@@ -321,9 +579,12 @@ type uploadAPIFixture struct {
 	rejectActivation bool
 	wantCert         string
 	wantKey          string
+	username         string
+	password         string
 	name             string
 	cleanupName      string
 	deletions        []string
+	afterActivation  func()
 }
 
 func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +605,15 @@ func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid login body", http.StatusBadRequest)
 			return
 		}
-		if credentials.Username != "admin" || credentials.Password != "console-password" {
+		username := api.username
+		if username == "" {
+			username = "admin"
+		}
+		password := api.password
+		if password == "" {
+			password = "console-password"
+		}
+		if credentials.Username != username || credentials.Password != password {
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
@@ -387,6 +656,9 @@ func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if api.rejectActivation {
 			http.Error(w, "activation rejected", http.StatusBadGateway)
 			return
+		}
+		if api.afterActivation != nil {
+			api.afterActivation()
 		}
 		w.WriteHeader(http.StatusNoContent)
 

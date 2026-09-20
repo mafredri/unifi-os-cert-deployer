@@ -42,6 +42,36 @@ certbot renew --deploy-hook /path/to/unifi-cert-upload
 
 If deployment fails after issuance, rerun the CLI with the saved certificate and key. The issuer may not call the hook again until the next renewal.
 
+### Multiple targets
+
+Set `UNIFI_TARGETS` and configure each target through its uppercase identifier:
+
+```sh
+UNIFI_TARGETS=home,protect
+UNIFI_HOME_DOMAIN=unifi.home.example.com
+UNIFI_HOME_URL=https://unifi.home.example.com
+UNIFI_HOME_USERNAME_FILE=/run/secrets/home-username
+UNIFI_HOME_PASSWORD_FILE=/run/secrets/home-password
+UNIFI_HOME_CERT_NAME="deployer: home"
+UNIFI_PROTECT_DOMAIN=protect.home.example.com
+UNIFI_PROTECT_URL=https://protect.home.example.com
+UNIFI_PROTECT_USERNAME_FILE=/run/secrets/protect-username
+UNIFI_PROTECT_PASSWORD_FILE=/run/secrets/protect-password
+UNIFI_PROTECT_CERT_NAME="deployer: protect"
+```
+
+Export these variables for the CLI, or put them in `.env` for Docker. Target identifiers are case-insensitive and use letters, digits, and underscores; empty entries are ignored. Each target also supports `USERNAME`, `PASSWORD`, `HTTP_TIMEOUT`, `SKIP_TLS_VERIFY`, and `CLEANUP` settings under its own `UNIFI_<ID>_` name. Target settings use their own defaults; global single-target settings are not inherited.
+
+Lego's hook sends the certificate to every target whose `DOMAIN` exactly matches an entry in `LEGO_HOOK_CERT_DOMAINS`. Wildcards match literally. For the example above, set `LEGO_DOMAINS=unifi.home.example.com,protect.home.example.com`: lego creates one certificate covering both domains, and the hook uploads it to both consoles. Independent certificates need separate lego invocations.
+
+Use `--target home` for a manual upload or retry to just that target, including with a Certbot hook:
+
+```sh
+bin/unifi-cert-upload --target home --cert /path/to/cert.pem --key /path/to/key.pem
+```
+
+Other selected targets are still attempted if one fails. Retry failed uploads individually; if upload succeeded but activation failed, activate the existing record in UniFi. Explicit `--name` and `--cleanup` flags override those settings for the selected targets.
+
 ## Automate with Docker and lego
 
 The included Compose setup handles Let's Encrypt certificates through DNS validation and deploys them to UniFi OS. It runs at startup and checks for renewal daily, keeping certificate state in a persistent volume.

@@ -17,45 +17,67 @@ import (
 
 func runCLI(ctx context.Context, args []string) (err error) {
 	logger := slog.Default()
-	operation := "configure"
-	defer func() {
-		if err != nil {
-			logger.Error("Certificate operation failed", "operation", operation, "error", err)
-		}
-	}()
-
 	cfg, err := LoadConfig(args)
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("load configuration: %w", err)
+		return logRunFailure(logger, "configure", fmt.Errorf("load configuration: %w", err))
 	}
 
-	operation = "read_certificate"
 	certPEM, err := os.ReadFile(cfg.CertFile)
 	if err != nil {
-		return fmt.Errorf("read certificate %q: %w", cfg.CertFile, err)
+		return logRunFailure(logger, "read_certificate", fmt.Errorf("read certificate %q: %w", cfg.CertFile, err))
 	}
-	operation = "read_private_key"
 	keyPEM, err := os.ReadFile(cfg.KeyFile)
 	if err != nil {
-		return fmt.Errorf("read private key %q: %w", cfg.KeyFile, err)
+		return logRunFailure(logger, "read_private_key", fmt.Errorf("read private key %q: %w", cfg.KeyFile, err))
 	}
-	operation = "fingerprint"
 	certificate, _ := pem.Decode(certPEM)
 	if certificate == nil || certificate.Type != "CERTIFICATE" {
-		return fmt.Errorf("decode certificate %q: expected a PEM CERTIFICATE block", cfg.CertFile)
+		return logRunFailure(logger, "fingerprint", fmt.Errorf("decode certificate %q: expected a PEM CERTIFICATE block", cfg.CertFile))
 	}
 	// SHA-1 matches UniFi's displayed certificate fingerprint.
 	fingerprint := sha1.Sum(certificate.Bytes)
 
-	operation = "create_client"
-	client, err := NewUniFiClient(cfg.UniFi)
+	var errs []error
+	for _, target := range cfg.Targets {
+		if err := ctx.Err(); err != nil {
+			logger.Error("Certificate operation canceled", "operation", "deploy", "error", err)
+			return errors.Join(append(errs, err)...)
+		}
+		if err := deployTarget(ctx, target, certPEM, keyPEM, fingerprint); err != nil {
+			name := target.ID
+			if name == "" {
+				name = "default"
+			}
+			errs = append(errs, fmt.Errorf("target %s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func logRunFailure(logger *slog.Logger, operation string, err error) error {
+	logger.Error("Certificate operation failed", "operation", operation, "error", err)
+	return err
+}
+
+func deployTarget(ctx context.Context, target TargetConfig, certPEM, keyPEM []byte, fingerprint [sha1.Size]byte) (err error) {
+	operation := "create_client"
+	logger := slog.Default()
+	if target.ID != "" {
+		logger = logger.With("target_id", target.ID)
+	}
+	defer func() {
+		if err != nil {
+			logger.Error("Certificate operation failed", "operation", operation, "error", err)
+		}
+	}()
+	client, err := NewUniFiClient(target.UniFi)
 	if err != nil {
 		return fmt.Errorf("create UniFi client: %w", err)
 	}
-	name := fmt.Sprintf("%s %x", cfg.Name, fingerprint[:4])
+	name := fmt.Sprintf("%s %x", target.Name, fingerprint[:4])
 	logger = logger.With("target", client.baseURL, "certificate", name)
 	operation = "login"
 	logger.Info("Logging in to UniFi", "operation", operation)
@@ -78,16 +100,19 @@ func runCLI(ctx context.Context, args []string) (err error) {
 	}
 	logger.Info("Certificate activated", "operation", operation)
 	operation = "cleanup"
-	if cfg.Cleanup {
-		if err := cleanupExpiredCertificates(ctx, client, cfg.Name); err != nil {
+	if target.Cleanup {
+		if err := cleanupExpiredCertificates(ctx, client, target.ID, target.Name); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func cleanupExpiredCertificates(ctx context.Context, client *UniFiClient, baseName string) error {
+func cleanupExpiredCertificates(ctx context.Context, client *UniFiClient, targetID, baseName string) error {
 	logger := slog.Default().With("target", client.baseURL, "operation", "cleanup")
+	if targetID != "" {
+		logger = logger.With("target_id", targetID)
+	}
 	logger.Info("Checking expired certificates", "name", baseName)
 	certificates, err := client.ListCertificates(ctx)
 	if err != nil {

@@ -18,7 +18,6 @@ RUN /lego --version \
 	&& chmod 0755 /usr/local/bin/unifi-cert-upload /usr/local/bin/docker-entrypoint.sh /usr/local/bin/run-lego-jobs /usr/local/bin/lego-deploy-hook /usr/local/bin/deploy-pending
 
 ENV LEGO_PATH=/data \
-	LEGO_DEPLOY_HOOK=/usr/local/bin/lego-deploy-hook \
-	LEGO_NO_BUNDLE=true
+	LEGO_DEPLOY_HOOK=/usr/local/bin/lego-deploy-hook
 VOLUME ["/data"]
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

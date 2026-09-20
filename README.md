@@ -27,10 +27,10 @@ Names combine the configured name, a space, and the first eight hexadecimal char
 
 The CLI reads certificate paths from lego and Certbot deploy hooks. Make the UniFi credentials above available to the hook process.
 
-For lego, set `LEGO_NO_BUNDLE=true` to upload the leaf certificate and add the deploy hook to your issuance command:
+For lego, add the deploy hook to your issuance command:
 
 ```sh
-LEGO_NO_BUNDLE=true lego run --dns hurricane --domains example.com \
+lego run --dns hurricane --domains example.com \
   --email ops@example.com --deploy-hook /path/to/unifi-cert-upload
 ```
 

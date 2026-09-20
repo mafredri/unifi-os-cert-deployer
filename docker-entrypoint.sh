@@ -23,10 +23,10 @@ if ! printf '%s\n' "$schedule" | awk 'NF != 5 { exit 1 }'; then
 	exit 1
 fi
 
-printf '%s /usr/bin/lego run\n' "$schedule" > /etc/crontabs/root
+printf '%s /lego run\n' "$schedule" > /etc/crontabs/root
 chmod 0600 /etc/crontabs/root
 
-if ! /usr/bin/lego run; then
+if ! /lego run; then
 	printf '%s\n' 'Initial lego run failed; cron will try again at the next scheduled time.' >&2
 fi
 

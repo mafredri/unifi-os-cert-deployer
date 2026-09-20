@@ -11,7 +11,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 FROM goacme/lego:v5.5.1
 COPY --from=uploader-build /out/unifi-cert-upload /usr/local/bin/unifi-cert-upload
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/unifi-cert-upload /usr/local/bin/docker-entrypoint.sh
+RUN /lego --version \
+	&& chmod 0755 /usr/local/bin/unifi-cert-upload /usr/local/bin/docker-entrypoint.sh
 
 ENV LEGO_PATH=/data \
 	LEGO_DEPLOY_HOOK=/usr/local/bin/unifi-cert-upload \

@@ -1,16 +1,99 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"flag"
 	"fmt"
+	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+var (
+	liveUniFiURL      = flag.String("url", "", "UniFi console root URL for TestUniFiLiveUpload")
+	liveUniFiActivate = flag.Bool("activate", false, "activate the uploaded certificate in TestUniFiLiveUpload")
+	liveUniFiInsecure = flag.Bool("insecure", false, "skip TLS verification in TestUniFiLiveUpload")
+)
+
+const maxLiveDiagnosticResponseBytes = 64 << 10
+
+func TestSessionCSRFTokenAuthorizesCertificateOperations(t *testing.T) {
+	for _, source := range []string{"X-CSRF-Token", "X-Updated-CSRF-Token", "cookie"} {
+		t.Run(source, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/auth/login" {
+					payload := base64.RawURLEncoding.EncodeToString([]byte(`{"csrfToken":"login-token"}`))
+					cookieValue := "opaque-session"
+					if source == "cookie" {
+						cookieValue = "header." + payload + ".signature"
+					}
+					http.SetCookie(w, &http.Cookie{Name: "TOKEN", Value: cookieValue, Path: "/"})
+					if source != "cookie" {
+						w.Header().Set(source, "login-token")
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				want := "rotated-token"
+				if r.Method == http.MethodPost {
+					want = "login-token"
+				}
+				if r.Header.Get("X-CSRF-Token") != want {
+					http.Error(w, "Invalid CSRF Token", http.StatusForbidden)
+					return
+				}
+				if _, err := r.Cookie("TOKEN"); err != nil {
+					http.Error(w, "missing session", http.StatusUnauthorized)
+					return
+				}
+				if r.Method == http.MethodPost {
+					w.Header().Set("X-CSRF-Token", "login-token")
+					w.Header().Set("X-Updated-CSRF-Token", "rotated-token")
+					writeTestJSON(t, w, map[string]string{"id": "uploaded"})
+					return
+				}
+				if r.Method == http.MethodGet {
+					writeTestJSON(t, w, []UniFiCertificate{})
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			client := mustNewTestUniFiClient(t, server.URL)
+			if err := client.Login(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			id, err := client.UploadCertificate(t.Context(), "test", []byte("cert"), []byte("key"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.ActivateCertificate(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.ListCertificates(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.DeleteCertificate(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestUploadCertificatePostsBytesAndNameWithoutWorkflow(t *testing.T) {
 	const certificate = "opaque certificate payload"
@@ -297,4 +380,169 @@ func mustNewTestUniFiClientWithConfig(t *testing.T, cfg UniFiConfig) *UniFiClien
 		t.Fatalf("NewUniFiClient returned error: %v", err)
 	}
 	return client
+}
+
+func TestUniFiLiveUpload(t *testing.T) {
+	if strings.TrimSpace(*liveUniFiURL) == "" {
+		t.Skip("set --url to run the live UniFi upload diagnostic")
+	}
+	username, err := secretValue("UNIFI_USERNAME", "UNIFI_USERNAME_FILE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	password, err := secretValue("UNIFI_PASSWORD", "UNIFI_PASSWORD_FILE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
+		t.Fatal("UNIFI_USERNAME or UNIFI_USERNAME_FILE and UNIFI_PASSWORD or UNIFI_PASSWORD_FILE are required")
+	}
+	certPEM, keyPEM, err := liveDiagnosticCertificate(*liveUniFiURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewUniFiClient(UniFiConfig{
+		URL: *liveUniFiURL, Username: username, Password: password,
+		HTTPTimeout: defaultUniFiHTTPTimeout, SkipTLSVerify: *liveUniFiInsecure,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http.Transport = &liveDiagnosticTransport{
+		base:       client.http.Transport,
+		t:          t,
+		redactions: []string{username, password, string(certPEM), string(keyPEM)},
+	}
+	if err := client.Login(t.Context()); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	name := "unifi-live-diagnostic-" + time.Now().UTC().Format("20060102T150405Z")
+	id, err := client.UploadCertificate(t.Context(), name, certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("upload certificate: %v", err)
+	}
+	t.Logf("live UniFi: uploaded certificate name=%q id=%q", name, id)
+	if *liveUniFiActivate {
+		if err := client.ActivateCertificate(t.Context(), id); err != nil {
+			t.Fatalf("activate certificate: %v", err)
+		}
+		t.Logf("live UniFi: uploaded certificate activated")
+	} else {
+		t.Logf("live UniFi: uploaded certificate remains inactive")
+	}
+}
+
+func liveDiagnosticCertificate(rawURL string) ([]byte, []byte, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse diagnostic URL: %w", err)
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return nil, nil, fmt.Errorf("diagnostic URL has no host")
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate certificate serial: %w", err)
+	}
+	serial.Add(serial, big.NewInt(1))
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate certificate key: %w", err)
+	}
+	now := time.Now()
+	template := x509.Certificate{
+		SerialNumber: serial, Subject: pkix.Name{CommonName: host},
+		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{host}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create diagnostic certificate: %w", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal diagnostic key: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+type liveDiagnosticTransport struct {
+	base       http.RoundTripper
+	t          *testing.T
+	redactions []string
+}
+
+func (d *liveDiagnosticTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	d.t.Helper()
+	response, err := d.base.RoundTrip(req)
+	if err != nil {
+		d.t.Logf("live UniFi: %s %s error=%v", req.Method, req.URL.EscapedPath(), err)
+		return nil, err
+	}
+	d.t.Logf("live UniFi: %s %s status=%s request-cookie=%t request-csrf=%t response-set-cookie=%t response-csrf=%t", req.Method, req.URL.EscapedPath(), response.Status, req.Header.Get("Cookie") != "", req.Header.Get("X-CSRF-Token") != "", len(response.Cookies()) > 0, response.Header.Get("X-CSRF-Token") != "" || response.Header.Get("X-Updated-CSRF-Token") != "")
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		redactions := append([]string{}, d.redactions...)
+		redactions = append(redactions, req.Header.Get("Cookie"), req.Header.Get("X-CSRF-Token"), response.Header.Get("X-CSRF-Token"), response.Header.Get("X-Updated-CSRF-Token"))
+		for _, cookie := range append(req.Cookies(), response.Cookies()...) {
+			redactions = append(redactions, cookie.Value)
+		}
+		d.logFailureResponse(response, redactions)
+	}
+	return response, nil
+}
+
+func (d *liveDiagnosticTransport) logFailureResponse(response *http.Response, redactions []string) {
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxLiveDiagnosticResponseBytes+1))
+	_ = response.Body.Close()
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil {
+		d.t.Logf("live UniFi: read error response: %v", err)
+		return
+	}
+	truncated := len(body) > maxLiveDiagnosticResponseBytes
+	if truncated {
+		body = body[:maxLiveDiagnosticResponseBytes]
+	}
+	d.t.Logf("live UniFi: server error response%s: %s", map[bool]string{true: " (truncated)", false: ""}[truncated], redactLiveDiagnosticBody(body, redactions))
+}
+
+func redactLiveDiagnosticBody(body []byte, redactions []string) string {
+	text := strings.TrimSpace(string(body))
+	var value any
+	if json.Unmarshal(body, &value) == nil {
+		if encoded, err := json.Marshal(redactLiveDiagnosticJSON(value)); err == nil {
+			text = string(encoded)
+		}
+	}
+	for _, secret := range redactions {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, "[REDACTED]")
+		}
+	}
+	return text
+}
+
+func redactLiveDiagnosticJSON(value any) any {
+	switch value := value.(type) {
+	case []any:
+		for index := range value {
+			value[index] = redactLiveDiagnosticJSON(value[index])
+		}
+	case map[string]any:
+		for name, nested := range value {
+			if strings.Contains(strings.ToLower(name), "password") || strings.Contains(strings.ToLower(name), "token") || strings.Contains(strings.ToLower(name), "secret") || strings.Contains(strings.ToLower(name), "key") || strings.Contains(strings.ToLower(name), "cert") || strings.Contains(strings.ToLower(name), "cookie") || strings.Contains(strings.ToLower(name), "authorization") {
+				value[name] = "[REDACTED]"
+				continue
+			}
+			value[name] = redactLiveDiagnosticJSON(nested)
+		}
+	}
+	return value
 }

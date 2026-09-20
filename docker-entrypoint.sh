@@ -27,7 +27,7 @@ printf '%s /lego run\n' "$schedule" > /etc/crontabs/root
 chmod 0600 /etc/crontabs/root
 
 if ! /lego run; then
-	printf '%s\n' 'Initial lego run failed; cron will try again at the next scheduled time.' >&2
+	printf '%s\n' 'Initial lego run failed. Cron will check renewal again; if deployment failed after issuance, retry unifi-cert-upload with the saved certificate and key.' >&2
 fi
 
 exec crond -f -l 2

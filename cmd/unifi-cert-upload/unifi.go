@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,10 +27,11 @@ type UniFiConfig struct {
 }
 
 type UniFiClient struct {
-	baseURL  string
-	http     *http.Client
-	username string
-	password string
+	baseURL   string
+	http      *http.Client
+	username  string
+	password  string
+	csrfToken string
 }
 
 func NewUniFiClient(cfg UniFiConfig) (*UniFiClient, error) {
@@ -91,6 +93,7 @@ func NewUniFiClient(cfg UniFiConfig) (*UniFiClient, error) {
 }
 
 func (c *UniFiClient) Login(ctx context.Context) error {
+	c.csrfToken = ""
 	credentials := struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -168,11 +171,17 @@ func (c *UniFiClient) requestJSON(ctx context.Context, method, path string, requ
 	if requestBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if c.csrfToken != "" {
+		req.Header.Set("X-CSRF-Token", c.csrfToken)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s: %w", operation, err)
 	}
 	defer resp.Body.Close()
+	if token := responseCSRFToken(resp); token != "" {
+		c.csrfToken = token
+	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxUniFiResponseBytes))
 		return fmt.Errorf("%s returned HTTP %s", operation, resp.Status)
@@ -192,4 +201,33 @@ func (c *UniFiClient) requestJSON(ctx context.Context, method, path string, requ
 		return fmt.Errorf("decode %s response: %w", operation, err)
 	}
 	return nil
+}
+
+func responseCSRFToken(resp *http.Response) string {
+	for _, header := range []string{"X-Updated-CSRF-Token", "X-CSRF-Token"} {
+		if token := resp.Header.Get(header); token != "" {
+			return token
+		}
+	}
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name != "TOKEN" {
+			continue
+		}
+		parts := strings.Split(cookie.Value, ".")
+		if len(parts) != 3 {
+			continue
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			continue
+		}
+		// Read the server-issued CSRF value; authentication remains the server's responsibility.
+		var claims struct {
+			CSRFToken string `json:"csrfToken"`
+		}
+		if json.Unmarshal(payload, &claims) == nil {
+			return claims.CSRFToken
+		}
+	}
+	return ""
 }

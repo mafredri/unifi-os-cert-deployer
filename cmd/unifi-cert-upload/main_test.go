@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +35,81 @@ func TestRunCLIUploadsFileContentsOnce(t *testing.T) {
 	}
 	if api.certificateLists != 0 {
 		t.Errorf("certificate lists = %d with cleanup disabled, want zero", api.certificateLists)
+	}
+}
+
+func TestRunCLILogsOperationsWithoutSecrets(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		cleanup        bool
+		rejectUpload   bool
+		wantMessages   []string
+		absentMessages []string
+	}{
+		{
+			name: "deployment with cleanup", cleanup: true,
+			wantMessages: []string{"Logging in to UniFi", "Logged in to UniFi", "csrf_token_available=true", "Uploading certificate", "Certificate uploaded", "Activating certificate", "Certificate activated", "Expired certificate deleted", "Certificate cleanup completed", "deleted=1"},
+		},
+		{
+			name:           "deployment without cleanup",
+			wantMessages:   []string{"Certificate uploaded", "Certificate activated"},
+			absentMessages: []string{"Checking expired certificates"},
+		},
+		{
+			name: "upload rejected", cleanup: true, rejectUpload: true,
+			wantMessages:   []string{"Uploading certificate", "Certificate operation failed", "operation=upload", "409 Conflict"},
+			absentMessages: []string{"Certificate uploaded", "Activating certificate", "Checking expired certificates"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+			certPEM := readCertificateFixture(t, "isrg-root-x1.pem")
+			keyPEM := []byte("private-key-secret-marker")
+			api := &uploadAPIFixture{
+				wantCert: string(certPEM), wantKey: string(keyPEM),
+				cleanupName: "fixture [prod]", rejectDuplicate: tt.rejectUpload,
+				name: "fixture [prod] cabd2a79",
+			}
+			server := httptest.NewServer(api)
+			defer server.Close()
+			certFile, keyFile := writeCLIInputFiles(t, certPEM, keyPEM)
+			setUploadEnvironment(t, server.URL, certFile, keyFile)
+			t.Setenv("UNIFI_CERT_NAME", "fixture [prod]")
+			if tt.cleanup {
+				t.Setenv("UNIFI_CLEANUP", "true")
+			}
+
+			err := runCLI(context.Background(), nil)
+			if (err != nil) != tt.rejectUpload {
+				t.Fatalf("runCLI() error = %v, want failure %t", err, tt.rejectUpload)
+			}
+			logs := output.String()
+			for _, message := range append(tt.wantMessages, "target="+server.URL) {
+				if !strings.Contains(logs, message) {
+					t.Errorf("logs missing %q: %s", message, logs)
+				}
+			}
+			for _, message := range tt.absentMessages {
+				if strings.Contains(logs, message) {
+					t.Errorf("logs contain unexpected %q: %s", message, logs)
+				}
+			}
+			wantErrors := 0
+			if tt.rejectUpload {
+				wantErrors = 1
+			}
+			if count := strings.Count(logs, "level=ERROR"); count != wantErrors {
+				t.Errorf("error log count = %d, want %d", count, wantErrors)
+			}
+			for _, secret := range []string{"admin", "console-password", string(keyPEM), strings.Split(string(certPEM), "\n")[1], "unifi-session", "csrf-secret-marker", "fixture response body"} {
+				if strings.Contains(logs, secret) {
+					t.Error("logs expose a credential, payload, or response body")
+				}
+			}
+		})
 	}
 }
 
@@ -272,6 +349,7 @@ func (api *uploadAPIFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		api.logins++
+		w.Header().Set("X-CSRF-Token", "csrf-secret-marker")
 		http.SetCookie(w, &http.Cookie{Name: "unifi-session", Value: "accepted", Path: "/"})
 		w.WriteHeader(http.StatusNoContent)
 

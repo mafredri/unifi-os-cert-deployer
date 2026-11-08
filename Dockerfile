@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine AS uploader-build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS uploader-build
 
 WORKDIR /src
 COPY . .

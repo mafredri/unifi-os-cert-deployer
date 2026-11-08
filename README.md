@@ -38,4 +38,4 @@ See [configuration](docs/configuration.md) for multiple certificates and console
 
 ## Development
 
-[mise](https://mise.jdx.dev) installs the tools in `mise.toml`. `mise run build` builds the CLI, `mise run check` runs checks, `mise run image` builds a local image, and `mise run image-test` builds and checks it.
+[mise](https://mise.jdx.dev) installs the tools in `mise.toml`. `mise run build` builds the CLI, `mise run check` runs checks, `mise run build/image` builds a local image, and `mise run test/image` builds and checks it.

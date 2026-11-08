@@ -9,39 +9,41 @@ shellcheck = "0.11.0"
 GOTOOLCHAIN = "local"
 
 [tasks.check]
-description = "Run every check: formatting, shellcheck, vet, tests, race tests, and cross builds"
-depends = ["fmt-check", "lint-sh"]
-run = [
-  "go vet ./...",
-  "go test ./...",
-  "go test -race ./...",
-  { task = "cross-build" },
-]
+description = "Run every check the CI test job runs"
+depends = ["fmt/check", "lint/sh", "lint/go", "test/go", "build/cross"]
 
-[tasks.fmt-check]
+[tasks."fmt/check"]
 description = "Check Go formatting"
 run = 'unformatted=$(gofmt -l cmd/unifi-cert-upload/*.go); if [ -n "$unformatted" ]; then printf "%s\n" "$unformatted"; exit 1; fi'
 
-[tasks.lint-sh]
+[tasks."lint/sh"]
 description = "Check the scripts with shellcheck"
 run = "shellcheck scripts/*.sh"
 
-[tasks.cross-build]
+[tasks."lint/go"]
+description = "Vet the Go code"
+run = "go vet ./..."
+
+[tasks."test/go"]
+description = "Run the Go tests with and without the race detector"
+run = ["go test ./...", "go test -race ./..."]
+
+[tasks.build]
+description = "Build the CLI as bin/unifi-cert-upload"
+run = ["mkdir -p bin", "go build -trimpath -o bin/unifi-cert-upload ./cmd/unifi-cert-upload"]
+
+[tasks."build/cross"]
 description = "Build the CLI for linux/amd64 and linux/arm64"
 run = [
   "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /dev/null ./cmd/unifi-cert-upload",
   "CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /dev/null ./cmd/unifi-cert-upload",
 ]
 
-[tasks.build]
-description = "Build the CLI as bin/unifi-cert-upload"
-run = ["mkdir -p bin", "go build -trimpath -o bin/unifi-cert-upload ./cmd/unifi-cert-upload"]
-
-[tasks.image]
+[tasks."build/image"]
 description = "Build the image as unifi-os-le-cert-deployer:local"
 run = "docker buildx build --load -t unifi-os-le-cert-deployer:local ."
 
-[tasks.image-test]
+[tasks."test/image"]
 description = "Build the image and check it with scripts/image-test.sh"
-depends = ["image"]
+depends = ["build/image"]
 run = "scripts/image-test.sh unifi-os-le-cert-deployer:local"

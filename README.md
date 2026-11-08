@@ -38,4 +38,4 @@ See [configuration](docs/configuration.md) for multiple certificates and console
 
 ## Development
 
-`make build` builds the CLI, `make check` runs checks, and `make image` builds a local image.
+`make build` builds the CLI, `make check` runs checks, `make image` builds a local image, and `make image-test` builds and checks it.

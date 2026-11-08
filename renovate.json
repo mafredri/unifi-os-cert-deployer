@@ -9,8 +9,7 @@
       "groupName": "Go"
     },
     {
-      "matchDatasources": ["docker"],
-      "matchPackageNames": ["golang"],
+      "matchPackageNames": ["golang", "golang/go"],
       "groupName": "Go"
     }
   ]

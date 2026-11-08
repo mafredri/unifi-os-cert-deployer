@@ -1,0 +1,47 @@
+# Tools and tasks for development and CI (jdx/mise-action). Renovate updates go
+# in one group with go.mod's go directive and the Dockerfile's golang image.
+[tools]
+go = "1.27.3"
+shellcheck = "0.11.0"
+
+[env]
+# Fail instead of downloading another Go when go.mod asks for a newer one.
+GOTOOLCHAIN = "local"
+
+[tasks.check]
+description = "Run every check: formatting, shellcheck, vet, tests, race tests, and cross builds"
+depends = ["fmt-check", "lint-sh"]
+run = [
+  "go vet ./...",
+  "go test ./...",
+  "go test -race ./...",
+  { task = "cross-build" },
+]
+
+[tasks.fmt-check]
+description = "Check Go formatting"
+run = 'unformatted=$(gofmt -l cmd/unifi-cert-upload/*.go); if [ -n "$unformatted" ]; then printf "%s\n" "$unformatted"; exit 1; fi'
+
+[tasks.lint-sh]
+description = "Check the scripts with shellcheck"
+run = "shellcheck scripts/*.sh"
+
+[tasks.cross-build]
+description = "Build the CLI for linux/amd64 and linux/arm64"
+run = [
+  "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /dev/null ./cmd/unifi-cert-upload",
+  "CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /dev/null ./cmd/unifi-cert-upload",
+]
+
+[tasks.build]
+description = "Build the CLI as bin/unifi-cert-upload"
+run = ["mkdir -p bin", "go build -trimpath -o bin/unifi-cert-upload ./cmd/unifi-cert-upload"]
+
+[tasks.image]
+description = "Build the image as unifi-os-le-cert-deployer:local"
+run = "docker buildx build --load -t unifi-os-le-cert-deployer:local ."
+
+[tasks.image-test]
+description = "Build the image and check it with scripts/image-test.sh"
+depends = ["image"]
+run = "scripts/image-test.sh unifi-os-le-cert-deployer:local"

@@ -4,7 +4,7 @@ A CLI for uploading and managing UniFi OS certificates, with a Docker and [lego]
 
 ## Upload certificates
 
-Build with `make build`, then use a UniFi OS account with permission to manage console certificates:
+Build with `mise run build`, then use a UniFi OS account with permission to manage console certificates:
 
 ```sh
 export UNIFI_URL=https://console.example.com
@@ -38,4 +38,4 @@ See [configuration](docs/configuration.md) for multiple certificates and console
 
 ## Development
 
-`make build` builds the CLI, `make check` runs checks, `make image` builds a local image, and `make image-test` builds and checks it.
+[mise](https://mise.jdx.dev) installs the tools in `mise.toml`. `mise run build` builds the CLI, `mise run check` runs checks, `mise run image` builds a local image, and `mise run image-test` builds and checks it.
